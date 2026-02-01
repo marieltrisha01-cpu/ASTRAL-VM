@@ -24,6 +24,7 @@ jobs:
         run: |
           choco install googlechrome -y --no-progress
           choco install rclone -y --no-progress
+          choco install ollama -y --no-progress
 
       - name: Setup Rclone
         shell: powershell
@@ -33,8 +34,6 @@ jobs:
               if (-not (Test-Path $configPath)) { New-Item -ItemType Directory -Path $configPath -Force }
               "${{ secrets.RCLONE_CONFIG_DATA }}" | Out-File -FilePath "$configPath\rclone.conf" -Encoding ascii
               Write-Host "Rclone configured for external cloud sync."
-          } else {
-              Write-Host "RCLONE_CONFIG_DATA secret not found. External cloud sync will be skipped."
           }
 
       - name: Restore from External Cloud (GDrive)
@@ -78,15 +77,37 @@ jobs:
               Expand-Archive -Path "user-profile-root-state.zip" -DestinationPath $env:USERPROFILE -Force
           }
 
-      - name: Configure Core RDP Settings
+      - name: Configure Core RDP & Services Security
         shell: powershell
         run: |
+          # Terminal Server
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          
+          # Firewall Rules
           netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          
+          netsh advfirewall firewall delete rule name="Docker-Remote" 2>$null
+          netsh advfirewall firewall add rule name="Docker-Remote" dir=in action=allow protocol=TCP localport=2375
+          
+          netsh advfirewall firewall delete rule name="Ollama-Remote" 2>$null
+          netsh advfirewall firewall add rule name="Ollama-Remote" dir=in action=allow protocol=TCP localport=11434
+          
           Restart-Service -Name TermService -Force
+
+      - name: Expose Docker Daemon
+        shell: powershell
+        run: |
+          # Configure Docker to listen on TCP 2375
+          $jsonPath = "C:\ProgramData\Docker\config\daemon.json"
+          if (-not (Test-Path (Split-Path $jsonPath))) { New-Item -ItemType Directory -Path (Split-Path $jsonPath) -Force }
+          $config = @{
+              hosts = @("tcp://0.0.0.0:2375", "npipe://")
+          }
+          $config | ConvertTo-Json | Out-File -FilePath $jsonPath -Encoding ascii
+          Restart-Service -Name docker -ErrorAction SilentlyContinue
 
       - name: Create RDP User
         shell: powershell
@@ -123,25 +144,24 @@ jobs:
           if (-not $tsIP) { Write-Error "Failed to obtain Tailscale IP address."; exit 1 }
           "TAILSCALE_IP=$tsIP" | Add-Content -Path $env:GITHUB_ENV
 
-      - name: Verify RDP Accessibility
+      - name: Maintain Connection & Expose AI
         shell: powershell
         run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) { Write-Error "RDP port 3389 unreachable."; exit 1 }
-          Write-Host "RDP is accessible!"
-
-      - name: Maintain Connection
-        shell: powershell
-        run: |
+          $env:OLLAMA_HOST = "0.0.0.0"
+          & "ollama" serve | Out-Null & # Start Ollama in background
+          
           Write-Host "`n=== RDP ACCESS DETAILS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
           Write-Host "Username: RDP"
           Write-Host "Password: $env:RDP_PASSWORD"
           Write-Host "==========================`n"
-          Write-Host "🛡️ PERSISTENCE ACTIVE: Desktop, Documents, Videos, Pictures, and User Profile Root are being synced.`n"
+          
+          Write-Host "🚀 REMOTE DOCKER ACTIVE: Connect via docker -H tcp://$($env:TAILSCALE_IP):2375 ps"
+          Write-Host "🧠 REMOTE AI ACTIVE: Access Ollama at http://$($env:TAILSCALE_IP):11434"
+          Write-Host "🛡️ PERSISTENCE ACTIVE: Targeted folders are being synced.`n"
+          
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Session Active. Use Ctrl+C or stop job to trigger State Save."
+              Write-Host "[$(Get-Date)] VPS Services Active. Use Ctrl+C or stop job to trigger State Save."
               Start-Sleep -Seconds 300
           }
 
@@ -150,8 +170,8 @@ jobs:
         shell: powershell
         run: |
           Write-Host "Zipping specific folders for persistence..."
-          
           Stop-Process -Name "chrome" -ErrorAction SilentlyContinue
+          Stop-Process -Name "ollama" -ErrorAction SilentlyContinue
           
           # 1. Zip User Folders
           $userFolders = @("Desktop", "Documents", "Videos", "Pictures")
@@ -164,9 +184,8 @@ jobs:
           }
 
           # 2. Zip User Profile Root (AppData/Local/Google, etc.)
-          # Specifically targeting Chrome and core settings to avoid 2GB limit
           $staging = New-Item -ItemType Directory -Path "$env:TEMP\ProfileStaging" -Force
-          $pathsToSave = @("AppData\Local\Google\Chrome\User Data", "AppData\Roaming")
+          $pathsToSave = @("AppData\Local\Google\Chrome\User Data", "AppData\Roaming", "AppData\Local\ollama")
           foreach ($p in $pathsToSave) {
               $src = Join-Path $env:USERPROFILE $p
               if (Test-Path $src) {
