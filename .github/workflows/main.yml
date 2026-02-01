@@ -25,20 +25,12 @@ jobs:
           choco install googlechrome -y --no-progress
           choco install rclone -y --no-progress
 
-      - name: Initialize Work Directory
-        shell: powershell
-        run: |
-          if (-not (Test-Path "C:\Work")) {
-              New-Item -ItemType Directory -Path "C:\Work" -Force
-          }
-
       - name: Setup Rclone
         shell: powershell
         run: |
           if ("${{ secrets.RCLONE_CONFIG_DATA }}") {
               $configPath = "$env:USERPROFILE\.config\rclone"
               if (-not (Test-Path $configPath)) { New-Item -ItemType Directory -Path $configPath -Force }
-              # Using Out-File with specific encoding to ensure secret is preserved exactly
               "${{ secrets.RCLONE_CONFIG_DATA }}" | Out-File -FilePath "$configPath\rclone.conf" -Encoding ascii
               Write-Host "Rclone configured for external cloud sync."
           } else {
@@ -67,17 +59,23 @@ jobs:
       - name: Restore State
         shell: powershell
         run: |
-          # 1. Restore Full User Profile Data (excluding some AppData system temps)
-          if (Test-Path "user-profile-state.zip") {
-              Write-Host "Restoring Full User Profile..."
-              # Expand to User Profile, overwriting existing items
-              Expand-Archive -Path "user-profile-state.zip" -DestinationPath $env:USERPROFILE -Force
+          $userFolders = @("Desktop", "Documents", "Videos", "Pictures")
+          
+          # 1. Restore User Folders
+          foreach ($folder in $userFolders) {
+              $zipFile = "$($folder.ToLower())-state.zip"
+              if (Test-Path $zipFile) {
+                  Write-Host "Restoring $folder..."
+                  $targetPath = [System.IO.Path]::Combine($env:USERPROFILE, $folder)
+                  if (-not (Test-Path $targetPath)) { New-Item -ItemType Directory -Path $targetPath -Force }
+                  Expand-Archive -Path $zipFile -DestinationPath $targetPath -Force
+              }
           }
 
-          # 2. Restore Work directory
-          if (Test-Path "work-state.zip") {
-              Write-Host "Restoring C:\Work directory..."
-              Expand-Archive -Path "work-state.zip" -DestinationPath "C:\Work" -Force
+          # 2. Restore User Profile Root (Hidden settings, Chrome data, etc.)
+          if (Test-Path "user-profile-root-state.zip") {
+              Write-Host "Restoring User Profile Root settings..."
+              Expand-Archive -Path "user-profile-root-state.zip" -DestinationPath $env:USERPROFILE -Force
           }
 
       - name: Configure Core RDP Settings
@@ -141,7 +139,7 @@ jobs:
           Write-Host "Username: RDP"
           Write-Host "Password: $env:RDP_PASSWORD"
           Write-Host "==========================`n"
-          Write-Host "🛡️ MAXIMUM PERSISTENCE ACTIVE: All folders in your user profile and C:\Work will be saved.`n"
+          Write-Host "🛡️ PERSISTENCE ACTIVE: Desktop, Documents, Videos, Pictures, and User Profile Root are being synced.`n"
           while ($true) {
               Write-Host "[$(Get-Date)] RDP Session Active. Use Ctrl+C or stop job to trigger State Save."
               Start-Sleep -Seconds 300
@@ -151,33 +149,33 @@ jobs:
         if: always()
         shell: powershell
         run: |
-          Write-Host "Zipping full system workspace for persistence..."
+          Write-Host "Zipping specific folders for persistence..."
           
-          # 1. Zip Full User Profile (excluding massive temp/cache directories)
-          # We use a custom filter to stay within artifact limits
           Stop-Process -Name "chrome" -ErrorAction SilentlyContinue
           
-          $includeFolders = @("Desktop", "Documents", "Downloads", "Pictures", "Videos", "Music", "AppData\Local\Google\Chrome\User Data", "AppData\Roaming")
-          $sourcePath = $env:USERPROFILE
-          $zipPath = "$env:GITHUB_WORKSPACE\user-profile-state.zip"
-          
-          # Create a temp directory for what we WANT to save
-          $tempSave = New-Item -ItemType Directory -Path "$env:TEMP\SaveStaging" -Force
-          foreach ($folder in $includeFolders) {
-              $fullPath = Join-Path $sourcePath $folder
-              if (Test-Path $fullPath) {
-                  $destPath = Join-Path $tempSave $folder
-                  New-Item -ItemType Directory -Path (Split-Path $destPath) -Force -ErrorAction SilentlyContinue
-                  Copy-Item -Path $fullPath -Destination $destPath -Recurse -Force -ErrorAction SilentlyContinue
+          # 1. Zip User Folders
+          $userFolders = @("Desktop", "Documents", "Videos", "Pictures")
+          foreach ($folder in $userFolders) {
+              $sourcePath = [System.IO.Path]::Combine($env:USERPROFILE, $folder)
+              if (Test-Path $sourcePath) {
+                  Write-Host "Zipping $folder..."
+                  Compress-Archive -Path "$sourcePath\*" -DestinationPath "$($folder.ToLower())-state.zip" -Force
               }
           }
-          
-          Compress-Archive -Path "$tempSave\*" -DestinationPath $zipPath -Force
 
-          # 2. Zip Work Directory
-          if (Test-Path "C:\Work") {
-              Compress-Archive -Path "C:\Work\*" -DestinationPath "$env:GITHUB_WORKSPACE\work-state.zip" -Force
+          # 2. Zip User Profile Root (AppData/Local/Google, etc.)
+          # Specifically targeting Chrome and core settings to avoid 2GB limit
+          $staging = New-Item -ItemType Directory -Path "$env:TEMP\ProfileStaging" -Force
+          $pathsToSave = @("AppData\Local\Google\Chrome\User Data", "AppData\Roaming")
+          foreach ($p in $pathsToSave) {
+              $src = Join-Path $env:USERPROFILE $p
+              if (Test-Path $src) {
+                  $dest = Join-Path $staging $p
+                  New-Item -ItemType Directory -Path (Split-Path $dest) -Force -ErrorAction SilentlyContinue
+                  Copy-Item -Path $src -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
+              }
           }
+          Compress-Archive -Path "$staging\*" -DestinationPath "user-profile-root-state.zip" -Force
 
       - name: Upload to GitHub Artifacts
         if: always()
@@ -185,8 +183,11 @@ jobs:
         with:
           name: runner-state
           path: |
-            user-profile-state.zip
-            work-state.zip
+            desktop-state.zip
+            documents-state.zip
+            videos-state.zip
+            pictures-state.zip
+            user-profile-root-state.zip
           retention-days: 7
 
       - name: Sync to External Cloud (GDrive)
