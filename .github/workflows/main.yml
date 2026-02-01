@@ -78,7 +78,7 @@ jobs:
           search_artifacts: true
           if_no_artifact_found: warn
 
-      - name: Restore State
+      - name: Restore State & Deploy Projects
         shell: powershell
         run: |
           $userFolders = @("Desktop", "Documents", "Videos", "Pictures")
@@ -96,6 +96,18 @@ jobs:
           if (Test-Path "user-profile-root-state.zip") {
               Write-Host "Restoring User Profile Root settings..."
               Expand-Archive -Path "user-profile-root-state.zip" -DestinationPath $env:USERPROFILE -Force
+          }
+          # 3. Handle Work-State (ASTRAL CLI, HERO, SCRAPER, etc.)
+          if (Test-Path "work-state.zip") {
+              Write-Host "Deploying projects to C:\Work..."
+              $workDir = "C:\Work"
+              if (-not (Test-Path $workDir)) { New-Item -ItemType Directory -Path $workDir -Force }
+              Expand-Archive -Path "work-state.zip" -DestinationPath $workDir -Force
+          }
+          # 4. Handle Specific beyond-infinity Zip
+          if (Test-Path "$env:USERPROFILE\Desktop\beyond-infinity-salon.zip") {
+              Write-Host "Extracting beyond-infinity-salon to Desktop..."
+              Expand-Archive -Path "$env:USERPROFILE\Desktop\beyond-infinity-salon.zip" -DestinationPath "$env:USERPROFILE\Desktop\beyond-infinity-salon" -Force
           }
 
       - name: Configure Core Security & Remote Access
@@ -222,7 +234,7 @@ jobs:
           }
           Compress-Archive -Path "$staging\*" -DestinationPath "user-profile-root-state.zip" -Force
 
-          # 3. Zip Work Folder
+          # 3. Zip Work Folder (Projects: ASTRAL, HERO, SCRAPER, etc.)
           if (Test-Path "C:\Work") {
               Compress-Archive -Path "C:\Work\*" -DestinationPath "work-state.zip" -Force
           }
