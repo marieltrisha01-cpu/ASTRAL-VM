@@ -25,6 +25,21 @@ jobs:
           choco install googlechrome -y --no-progress
           choco install rclone -y --no-progress
           choco install ollama -y --no-progress
+          choco install git -y --no-progress
+          choco install nodejs -y --no-progress
+          choco install tmux -y --no-progress # For terminal persistence
+
+      - name: Install Development CLIs
+        shell: powershell
+        run: |
+          # Install ACLI (for rovodev)
+          npm install -g @atlassian/cli
+          # Install Opencode
+          npm install -g opencode-ai
+          # Install Gemini CLI
+          npm install -g @google/cloudevents-types # Helper
+          npm install -g gemini-chat-cli # Common Gemini CLI
+          Write-Host "CLIs installed: acli, opencode, gemini-chat-cli"
 
       - name: Setup SSH Server
         shell: powershell
@@ -125,6 +140,22 @@ jobs:
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
           "RDP_PASSWORD=$pass" | Add-Content -Path $env:GITHUB_ENV
 
+      - name: Automatic Project Deployment
+        shell: powershell
+        run: |
+          if ("${{ secrets.PROJECT_REPO_URL }}") {
+              $workDir = "C:\Work"
+              if (-not (Test-Path $workDir)) { New-Item -ItemType Directory -Path $workDir -Force }
+              Set-Location $workDir
+              if (-not (Test-Path ".git")) {
+                  git clone ${{ secrets.PROJECT_REPO_URL }} .
+                  npm install
+              } else {
+                  git pull
+              }
+              Write-Host "Project deployed to $workDir"
+          }
+
       - name: Install Tailscale
         shell: powershell
         run: |
@@ -168,7 +199,7 @@ jobs:
           Write-Host "Password: $env:RDP_PASSWORD"
           Write-Host "==========================`n"
           Write-Host "📱 TERMINAL (SSH): ssh RDP@$($env:TAILSCALE_IP)"
-          Write-Host "🚀 DOCKER: docker -H tcp://$($env:TAILSCALE_IP):2375 ps"
+          Write-Host "🛠️ DOCKS: acli, opencode, gemini-chat-cli"
           Write-Host "🧠 AI LAB: Qwen2.5-Coder 3B active at http://$($env:TAILSCALE_IP):11434"
           Write-Host "🛡️ AUTOMATIC PERSISTENCE: Data is safe!`n"
           
@@ -193,7 +224,7 @@ jobs:
               }
           }
 
-          # 2. Zip User Profile Root (AppData/Local/Google, etc.)
+          # 2. Zip User Profile Root
           $staging = New-Item -ItemType Directory -Path "$env:TEMP\ProfileStaging" -Force
           $pathsToSave = @("AppData\Local\Google\Chrome\User Data", "AppData\Roaming", "AppData\Local\ollama")
           foreach ($p in $pathsToSave) {
@@ -205,6 +236,11 @@ jobs:
               }
           }
           Compress-Archive -Path "$staging\*" -DestinationPath "user-profile-root-state.zip" -Force
+
+          # 3. Zip Work Folder
+          if (Test-Path "C:\Work") {
+              Compress-Archive -Path "C:\Work\*" -DestinationPath "work-state.zip" -Force
+          }
 
       - name: Upload to GitHub Artifacts
         if: always()
