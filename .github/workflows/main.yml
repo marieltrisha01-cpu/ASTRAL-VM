@@ -1,4 +1,4 @@
-name: RDP
+name: RDP (Persistent)
 
 on:
   workflow_dispatch:
@@ -12,34 +12,82 @@ jobs:
       - name: Configure Core RDP Settings
         shell: powershell
         run: |
-          # Enable Remote Desktop and disable Network Level Authentication (if needed)
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force | Out-Null
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force | Out-Null
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force | Out-Null
-
-          # Remove any existing rule with the same name to avoid duplication
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
+          # Enable RDP and optimize for speed
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force | Out-Null
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force | Out-Null
           
-          # Allow incoming connection on port 3389
-          netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389 | Out-Null
-
-          # Restart the Remote Desktop service to ensure changes take effect
+          # Open firewall for RDP
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389 | Out-Null
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User with Secure Password
+      - name: Install Tools (Tailscale & Rclone)
         shell: powershell
         run: |
+          # Rapid install using stable direct downloads
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.94.1.exe"
+          $rcUrl = "https://downloads.rclone.org/rclone-current-windows-amd64.zip"
+          
+          # Install Tailscale
+          Invoke-WebRequest -Uri $tsUrl -OutFile "$env:TEMP\tailscale.exe"
+          Start-Process "$env:TEMP\tailscale.exe" -ArgumentList "/quiet" -Wait
+          
+          # Setup Rclone for Persistence
+          Invoke-WebRequest -Uri $rcUrl -OutFile "$env:TEMP\rclone.zip"
+          Expand-Archive -Path "$env:TEMP\rclone.zip" -DestinationPath "$env:TEMP\rclone" -Force
+          $rcPath = Get-ChildItem -Path "$env:TEMP\rclone" -Filter "rclone.exe" -Recurse | Select-Object -First 1
+          Copy-Item $rcPath.FullName -Destination "C:\Windows\System32\rclone.exe" -Force
+          
+          # Cleanup installers
+          Remove-Item "$env:TEMP\tailscale.exe", "$env:TEMP\rclone.zip" -Force
+
+      - name: Setup Rclone Configuration
+        shell: powershell
+        run: |
+          # Write the rclone config from secrets
+          $configPath = [System.IO.Path]::Combine($env:AppData, "rclone", "rclone.conf")
+          New-Item -ItemType Directory -Path (Split-Path $configPath) -Force | Out-Null
+          Set-Content -Path $configPath -Value @"
+          ${{ secrets.RCLONE_CONFIG }}
+          "@
+
+      - name: Restore Global State (Data Persistence)
+        shell: powershell
+        run: |
+          Write-Host "Checking for existing state on Drive..."
+          # Only attempt restore if config is provided
+          if (-not "${{ secrets.RCLONE_CONFIG }}") { Write-Host "No Rclone config found, skipping restore."; return }
+          
+          # Target folders for persistence
+          $targets = @("desktop", "documents", "tailscale-state")
+          foreach ($t in $targets) {
+              if (rclone ls "drive:$t-state.zip" 2>$null) {
+                  Write-Host "Restoring $t..."
+                  rclone copy "drive:$t-state.zip" .
+                  Expand-Archive -Path "$t-state.zip" -DestinationPath "C:\temp-restore\$t" -Force
+                  
+                  # Move tailored files back to their source
+                  if ($t -eq "tailscale-state") {
+                      $tsPath = "$env:ProgramData\Tailscale"
+                      if (Test-Path "C:\temp-restore\$t") {
+                          Copy-Item "C:\temp-restore\$t\*" $tsPath -Recurse -Force
+                      }
+                  } else {
+                      $dest = [System.IO.Path]::Combine($env:USERPROFILE, $t)
+                      Copy-Item "C:\temp-restore\$t\*" $dest -Recurse -Force
+                  }
+                  Remove-Item "$t-state.zip" -Force
+              }
+          }
+
+      - name: Create Managed VPS User
+        shell: powershell
+        run: |
+          # Use requested secure password generation
           Add-Type -AssemblyName System.Security
           $charSet = @{
-              Upper   = [char[]](65..90)      # A-Z
-              Lower   = [char[]](97..122)     # a-z
-              Number  = [char[]](48..57)      # 0-9
-              Special = ([char[]](33..47) + [char[]](58..64) +
-                         [char[]](91..96) + [char[]](123..126)) # Special characters
+              Upper   = [char[]](65..90); Lower = [char[]](97..122); 
+              Number  = [char[]](48..57); Special = [char[]](33..47)
           }
           $rawPassword = @()
           $rawPassword += $charSet.Upper | Get-Random -Count 4
@@ -54,72 +102,58 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
           
-          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
-          
-          if (-not (Get-LocalUser -Name "RDP")) {
-              Write-Error "User creation failed"
-              exit 1
-          }
+          "RDP_PASSWORD=$password" | Add-Content -Path $env:GITHUB_ENV
 
-      - name: Install Tailscale
-        shell: powershell
-        run: |
-          # Rapid install via EXE - version 1.94.1 is stable
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.94.1.exe"
-          $installerPath = "$env:TEMP\tailscale.exe"
-          
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process $installerPath -ArgumentList "/quiet" -Wait
-          Remove-Item $installerPath -Force
-
-      - name: Establish Tailscale Connection
+      - name: Establish Connection (Tailscale)
         shell: powershell
         run: |
           $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
           
-          # Bring up Tailscale with the provided auth key and set a unique hostname
-          & $tsExe up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          # Bring up Tailscale (Login is reused if restored)
+          & $tsExe up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-persistent
           
-          # Wait for Tailscale to assign an IP (up to 1 minute)
-          $tsIP = $null
-          $retries = 0
+          $tsIP = $null; $retries = 0
           while (-not $tsIP -and $retries -lt 12) {
-              $tsIP = & $tsExe ip -4
-              if ($tsIP) { break }
-              Start-Sleep -Seconds 5
-              $retries++
+              $tsIP = & $tsExe ip -4; if ($tsIP) { break }; Start-Sleep -Seconds 5; $retries++
           }
-          
-          if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
-              exit 1
-          }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-      
-      - name: Verify RDP Accessibility
-        shell: powershell
-        run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          
-          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
-              exit 1
-          }
-          Write-Host "TCP connectivity successful!"
+          if (-not $tsIP) { Write-Error "Tailscale IP failed"; exit 1 }
+          "TAILSCALE_IP=$tsIP" | Add-Content -Path $env:GITHUB_ENV
 
-      - name: Maintain Connection
+      - name: Work Session
         shell: powershell
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: $env:RDP_PASSWORD"
-          Write-Host "==================`n"
+          Write-Host "`n=== RDP LOGIN DETAILS ==="
+          Write-Host "IP: $env:TAILSCALE_IP"
+          Write-Host "User: RDP"
+          Write-Host "Pass: $env:RDP_PASSWORD"
+          Write-Host "=========================`n"
           
-          # Keep runner active indefinitely (or until manually cancelled)
-          while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
-              Start-Sleep -Seconds 300
+          # Keep alive
+          while ($true) { Start-Sleep -Seconds 300 }
+
+      - name: Save Global State (Cleanup Policy)
+        if: always()
+        shell: powershell
+        run: |
+          Write-Host "Saving state for persistence..."
+          if (-not "${{ secrets.RCLONE_CONFIG }}") { return }
+          
+          # 1. Save Tailscale login state (Crucial to avoid node limit)
+          $tsState = "$env:ProgramData\Tailscale"
+          if (Test-Path $tsState) {
+              Compress-Archive -Path "$tsState\*" -DestinationPath "tailscale-state.zip" -Force
+              rclone copy "tailscale-state.zip" "drive:"
+          }
+
+          # 2. Save User Folders
+          $userFolders = @("Desktop", "Documents")
+          foreach ($folder in $userFolders) {
+              $source = [System.IO.Path]::Combine($env:USERPROFILE, $folder)
+              if (Test-Path $source) {
+                  $files = Get-ChildItem $source
+                  if ($files) {
+                      Compress-Archive -Path "$source\*" -DestinationPath "$($folder.ToLower())-state.zip" -Force
+                      rclone copy "$($folder.ToLower())-state.zip" "drive:"
+                  }
+              }
           }
