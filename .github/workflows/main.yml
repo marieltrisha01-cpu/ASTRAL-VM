@@ -103,9 +103,9 @@ jobs:
         shell: powershell
         run: |
           # Terminal Server
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force | Out-Null
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force | Out-Null
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force | Out-Null
           
           # Firewall Rules
           netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
@@ -117,7 +117,7 @@ jobs:
           netsh advfirewall firewall delete rule name="Ollama-Remote" 2>$null
           netsh advfirewall firewall add rule name="Ollama-Remote" dir=in action=allow protocol=TCP localport=11434
           
-          Restart-Service -Name TermService, sshd -Force
+          Restart-Service -Name TermService, sshd -Force -ErrorAction SilentlyContinue
 
       - name: Expose Docker Daemon
         continue-on-error: true
@@ -134,7 +134,8 @@ jobs:
         run: |
           $pass = "${{ secrets.USER_PASSWORD }}"
           if (-not $pass) {
-              $pass = -join ((65..90) + (97..122) + (48..57) + (33,35..38,42,43,45) | Get-Random -Count 16 | ForEach-Object {[char]$_})
+              $chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#%&()*+,-./:;<=>?@[\]^_`{|}~"
+              $pass = -join ((1..16) | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
           }
           $securePass = ConvertTo-SecureString $pass -AsPlainText -Force
           if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) { Remove-LocalUser -Name "RDP" }
@@ -195,9 +196,9 @@ jobs:
         shell: powershell
         run: |
           Write-Host "Zipping specific folders for persistence..."
-          # Safely stop processes to release file locks using taskkill (more robust in runners)
-          taskkill /F /IM chrome.exe /T /FI "STATUS eq RUNNING" 2>$null
-          taskkill /F /IM sshd.exe /T /FI "STATUS eq RUNNING" 2>$null
+          # Safely stop processes using taskkill to release file locks
+          taskkill /F /IM chrome.exe /T 2>$null
+          taskkill /F /IM sshd.exe /T 2>$null
           
           # 1. Zip User Folders
           $userFolders = @("Desktop", "Documents", "Videos", "Pictures")
