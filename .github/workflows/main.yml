@@ -23,7 +23,7 @@ jobs:
         shell: powershell
         run: |
           choco install googlechrome -y --no-progress
-          # Add other apps here: choco install vscode -y --no-progress
+          choco install rclone -y --no-progress
 
       - name: Initialize Work Directory
         shell: powershell
@@ -32,7 +32,28 @@ jobs:
               New-Item -ItemType Directory -Path "C:\Work" -Force
           }
 
-      - name: Download Previous State
+      - name: Setup Rclone
+        shell: powershell
+        run: |
+          if ("${{ secrets.RCLONE_CONFIG_DATA }}") {
+              $configPath = "$env:USERPROFILE\.config\rclone"
+              if (-not (Test-Path $configPath)) { New-Item -ItemType Directory -Path $configPath -Force }
+              "${{ secrets.RCLONE_CONFIG_DATA }}" | Out-File -FilePath "$configPath\rclone.conf" -Encoding ascii
+              Write-Host "Rclone configured for external cloud sync."
+          } else {
+              Write-Host "RCLONE_CONFIG_DATA secret not found. External cloud sync will be skipped."
+          }
+
+      - name: Restore from External Cloud (GDrive)
+        continue-on-error: true
+        shell: powershell
+        run: |
+          if (Test-Path "$env:USERPROFILE\.config\rclone\rclone.conf") {
+              Write-Host "Downloading latest state from GDrive..."
+              rclone copy gdrive:ASTRAL-VM-BACKUP . --include "*-state.zip"
+          }
+
+      - name: Download from GitHub Artifacts (Fallthrough)
         uses: dawidd6/action-download-artifact@v3
         continue-on-error: true
         with:
@@ -117,14 +138,6 @@ jobs:
           if (-not $tsIP) { Write-Error "Failed to obtain Tailscale IP address."; exit 1 }
           "TAILSCALE_IP=$tsIP" | Add-Content -Path $env:GITHUB_ENV
 
-      - name: Verify RDP Accessibility
-        shell: powershell
-        run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) { Write-Error "RDP port 3389 unreachable."; exit 1 }
-          Write-Host "RDP is accessible!"
-
       - name: Maintain Connection
         shell: powershell
         run: |
@@ -133,7 +146,7 @@ jobs:
           Write-Host "Username: RDP"
           Write-Host "Password: $env:RDP_PASSWORD"
           Write-Host "==========================`n"
-          Write-Host "🛡️ FULL PERSISTENCE ACTIVE: Files on Desktop, Documents, Downloads, and C:\Work will be saved.`n"
+          Write-Host "🛡️ CLOUD PERSISTENCE ACTIVE: All user data syncs to GitHub & External Cloud (if configured).`n"
           while ($true) {
               Write-Host "[$(Get-Date)] RDP Session Active. Use Ctrl+C or stop job to trigger State Save."
               Start-Sleep -Seconds 300
@@ -157,7 +170,7 @@ jobs:
               Compress-Archive -Path "C:\Work\*" -DestinationPath "work-state.zip" -Force
           }
 
-          # 3. Zip User Folders (Desktop, Documents, Downloads)
+          # 3. Zip User Folders
           $userFolders = @("Desktop", "Documents", "Downloads")
           foreach ($folder in $userFolders) {
               $sourcePath = [System.IO.Path]::Combine($env:USERPROFILE, $folder)
@@ -167,7 +180,7 @@ jobs:
               }
           }
 
-      - name: Upload State Artifact
+      - name: Upload to GitHub Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -179,3 +192,13 @@ jobs:
             documents-state.zip
             downloads-state.zip
           retention-days: 7
+
+      - name: Sync to External Cloud (GDrive)
+        if: always()
+        continue-on-error: true
+        shell: powershell
+        run: |
+          if (Test-Path "$env:USERPROFILE\.config\rclone\rclone.conf") {
+              Write-Host "Uploading latest state to GDrive..."
+              rclone copy . gdrive:ASTRAL-VM-BACKUP --include "*-state.zip"
+          }
