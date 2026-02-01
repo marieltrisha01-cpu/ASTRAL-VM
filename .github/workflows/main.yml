@@ -195,14 +195,20 @@ jobs:
         shell: powershell
         run: |
           Write-Host "Zipping specific folders for persistence..."
-          Stop-Process -Name "chrome", "sshd" -ErrorAction SilentlyContinue
+          # Safely stop processes to release file locks using taskkill (more robust in runners)
+          taskkill /F /IM chrome.exe /T /FI "STATUS eq RUNNING" 2>$null
+          taskkill /F /IM sshd.exe /T /FI "STATUS eq RUNNING" 2>$null
           
           # 1. Zip User Folders
           $userFolders = @("Desktop", "Documents", "Videos", "Pictures")
           foreach ($folder in $userFolders) {
               $sourcePath = [System.IO.Path]::Combine($env:USERPROFILE, $folder)
               if (Test-Path $sourcePath) {
-                  Compress-Archive -Path "$sourcePath\*" -DestinationPath "$($folder.ToLower())-state.zip" -Force
+                  $files = Get-ChildItem -Path "$sourcePath\*" -ErrorAction SilentlyContinue
+                  if ($files) {
+                      Write-Host "Zipping $folder..."
+                      Compress-Archive -Path "$sourcePath\*" -DestinationPath "$($folder.ToLower())-state.zip" -Force -ErrorAction SilentlyContinue
+                  }
               }
           }
 
@@ -217,11 +223,17 @@ jobs:
                   Copy-Item -Path $src -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
               }
           }
-          Compress-Archive -Path "$staging\*" -DestinationPath "user-profile-root-state.zip" -Force
+          $stagingFiles = Get-ChildItem -Path "$staging\*" -ErrorAction SilentlyContinue
+          if ($stagingFiles) {
+              Compress-Archive -Path "$staging\*" -DestinationPath "user-profile-root-state.zip" -Force -ErrorAction SilentlyContinue
+          }
 
           # 3. Zip Work Folder (Projects: ASTRAL, HERO, SCRAPER, etc.)
           if (Test-Path "C:\Work") {
-              Compress-Archive -Path "C:\Work\*" -DestinationPath "work-state.zip" -Force
+              $workFiles = Get-ChildItem -Path "C:\Work\*" -ErrorAction SilentlyContinue
+              if ($workFiles) {
+                  Compress-Archive -Path "C:\Work\*" -DestinationPath "work-state.zip" -Force -ErrorAction SilentlyContinue
+              }
           }
 
       - name: Upload to GitHub Artifacts
