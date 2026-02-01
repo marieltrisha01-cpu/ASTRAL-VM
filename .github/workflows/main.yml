@@ -2,6 +2,8 @@ name: RDP
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 */5 * * *' # Every 5 hours to stay within the 6-hour runner limit
 
 jobs:
   secure-rdp:
