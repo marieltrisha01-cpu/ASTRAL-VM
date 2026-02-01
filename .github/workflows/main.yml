@@ -2,6 +2,8 @@ name: RDP
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ main ]
   schedule:
     - cron: '0 */5 * * *' # Every 5 hours to stay within the 6-hour runner limit
 
@@ -26,20 +28,10 @@ jobs:
           choco install rclone -y --no-progress
           choco install git -y --no-progress
           choco install nodejs -y --no-progress
-          # Omitted manual AI CLI installs per user request to ensure stability
+          # Omitted manual AI CLI and Ollama installs per user request to ensure speed and stability
 
-      - name: Install Ollama (Official Installer)
-        shell: powershell
-        run: |
-          Write-Host "Downloading Ollama Setup..."
-          $url = "https://ollama.com/download/OllamaSetup.exe"
-          $outpath = "$env:TEMP\OllamaSetup.exe"
-          Invoke-WebRequest -Uri $url -OutFile $outpath
-          Write-Host "Installing Ollama..."
-          Start-Process -FilePath $outpath -ArgumentList "/silent" -Wait
-          Write-Host "Ollama Installed."
-
-      # Removed "Install AI CLI Studio" step per user request to allow manual setup
+      # Removed Ollama and AI CLI installation steps per user request. 
+      # You can manually install these once logged in to have full control.
 
       - name: Setup SSH Server
         shell: powershell
@@ -180,20 +172,9 @@ jobs:
           }
           Write-Error "Failed to connect to Tailscale after 12 attempts."; exit 1
 
-      - name: Maintain Connection & High-Performance AI
+      - name: Maintain Connection & Boot Ready
         shell: powershell
         run: |
-          $env:OLLAMA_HOST = "0.0.0.0"
-          # Wait for Ollama service (installed by installer)
-          Start-Sleep -Seconds 10
-          # If not running, attempt start
-          if (-not (Get-Process ollama -ErrorAction SilentlyContinue)) {
-             try { Start-Process "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe" -ArgumentList "serve" -WindowStyle Hidden } catch { Write-Host "Ollama start failed, skipping..." }
-          }
-          Start-Sleep -Seconds 10
-          Write-Host "Pulling Qwen2.5-Coder 3B (Best for end-to-end coding)..."
-          & "ollama" pull qwen2.5-coder:3b
-          
           Write-Host "`n=== VPS ACCESS DETAILS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
           Write-Host "Username: RDP"
@@ -201,10 +182,9 @@ jobs:
           Write-Host "==========================`n"
           Write-Host "📱 TERMINAL (SSH): ssh RDP@$($env:TAILSCALE_IP)"
           Write-Host "🛡️ SAFE ZONES: C:\Work, Desktop, Documents"
-          Write-Host "🛠️ TOOLS: Git, Node.js, Ollama (Pre-installed)"
-          Write-Host "👨‍💻 USER ACTION: Manually install AI CLIs (minimax, gemini, etc.) as needed."
-          Write-Host "🧠 AI LAB: Qwen2.5-Coder 3B active at http://$($env:TAILSCALE_IP):11434"
-          Write-Host "🛡️ AUTOMATIC PERSISTENCE: Data is safe!`n"
+          Write-Host "🛠️ PRE-INSTALLED: Chrome, Rclone, Git, Node.js"
+          Write-Host "⚡ READY FOR MANUAL SETUP: Ollama, AI CLIs"
+          Write-Host "🛡️ AUTOMATIC PERSISTENCE: Active`n"
           
           while ($true) {
               Write-Host "[$(Get-Date)] VPS Healthy. Use Ctrl+C or stop job to trigger State Save."
@@ -216,7 +196,7 @@ jobs:
         shell: powershell
         run: |
           Write-Host "Zipping specific folders for persistence..."
-          Stop-Process -Name "chrome", "ollama", "sshd" -ErrorAction SilentlyContinue
+          Stop-Process -Name "chrome", "sshd" -ErrorAction SilentlyContinue
           
           # 1. Zip User Folders
           $userFolders = @("Desktop", "Documents", "Videos", "Pictures")
@@ -229,7 +209,7 @@ jobs:
 
           # 2. Zip User Profile Root
           $staging = New-Item -ItemType Directory -Path "$env:TEMP\ProfileStaging" -Force
-          $pathsToSave = @("AppData\Local\Google\Chrome\User Data", "AppData\Roaming", "AppData\Local\ollama")
+          $pathsToSave = @("AppData\Local\Google\Chrome\User Data", "AppData\Roaming")
           foreach ($p in $pathsToSave) {
               $src = Join-Path $env:USERPROFILE $p
               if (Test-Path $src) {
