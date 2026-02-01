@@ -27,7 +27,7 @@ jobs:
           choco install ollama -y --no-progress
           choco install git -y --no-progress
           choco install nodejs -y --no-progress
-          choco install tmux -y --no-progress # For terminal persistence
+          # Removed tmux from choco as it is not available on windows runners via choco
 
       - name: Install AI CLI Studio (Mobile Ready)
         shell: powershell
