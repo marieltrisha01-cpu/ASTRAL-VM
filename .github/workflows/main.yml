@@ -25,6 +25,13 @@ jobs:
           choco install googlechrome -y --no-progress
           # Add other apps here: choco install vscode -y --no-progress
 
+      - name: Initialize Work Directory
+        shell: powershell
+        run: |
+          if (-not (Test-Path "C:\Work")) {
+              New-Item -ItemType Directory -Path "C:\Work" -Force
+          }
+
       - name: Download Previous State
         uses: dawidd6/action-download-artifact@v3
         continue-on-error: true
@@ -35,9 +42,10 @@ jobs:
           search_artifacts: true
           if_no_artifact_found: warn
 
-      - name: Restore Chrome State
+      - name: Restore State
         shell: powershell
         run: |
+          # Restore Chrome
           $chromePath = "$env:LOCALAPPDATA\Google\Chrome\User Data"
           if (Test-Path "chrome-state.zip") {
               Write-Host "Restoring Chrome profile..."
@@ -45,8 +53,12 @@ jobs:
                   New-Item -ItemType Directory -Path $chromePath -Force
               }
               Expand-Archive -Path "chrome-state.zip" -DestinationPath "$chromePath\.." -Force
-          } else {
-              Write-Host "No Chrome state found to restore."
+          }
+
+          # Restore General Work Data
+          if (Test-Path "work-state.zip") {
+              Write-Host "Restoring Work directory..."
+              Expand-Archive -Path "work-state.zip" -DestinationPath "C:\Work" -Force
           }
 
       - name: Configure Core RDP Settings
@@ -122,7 +134,7 @@ jobs:
           }
           Write-Host "RDP is accessible!"
 
-      - name: Maintain Connection & Save State
+      - name: Maintain Connection
         shell: powershell
         run: |
           Write-Host "`n=== RDP ACCESS DETAILS ==="
@@ -130,6 +142,7 @@ jobs:
           Write-Host "Username: RDP"
           Write-Host "Password: $env:RDP_PASSWORD"
           Write-Host "==========================`n"
+          Write-Host "IMPORTANT: Save all files in C:\Work to preserve them across runs.`n"
 
           while ($true) {
               Write-Host "[$(Get-Date)] RDP Session Active. Use Ctrl+C or stop job to trigger State Save."
@@ -140,14 +153,18 @@ jobs:
         if: always()
         shell: powershell
         run: |
-          Write-Host "Zipping Chrome User Data for persistence..."
+          Write-Host "Zipping state for persistence..."
+          
+          # 1. Zip Chrome
           $chromePath = "$env:LOCALAPPDATA\Google\Chrome\User Data"
-          
-          # Kill Chrome to release file locks before zipping
           Stop-Process -Name "chrome" -ErrorAction SilentlyContinue
-          
           if (Test-Path $chromePath) {
               Compress-Archive -Path $chromePath -DestinationPath "chrome-state.zip" -Force
+          }
+
+          # 2. Zip Work Directory
+          if (Test-Path "C:\Work") {
+              Compress-Archive -Path "C:\Work\*" -DestinationPath "work-state.zip" -Force
           }
 
       - name: Upload State Artifact
@@ -155,5 +172,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: runner-state
-          path: chrome-state.zip
+          path: |
+            chrome-state.zip
+            work-state.zip
           retention-days: 7
