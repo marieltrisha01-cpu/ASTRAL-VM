@@ -30,9 +30,6 @@ jobs:
           choco install nodejs -y --no-progress
           # Omitted manual AI CLI and Ollama installs per user request to ensure speed and stability
 
-      # Removed Ollama and AI CLI installation steps per user request. 
-      # You can manually install these once logged in to have full control.
-
       - name: Setup SSH Server
         shell: powershell
         run: |
@@ -102,6 +99,7 @@ jobs:
           }
 
       - name: Configure Core Security & Remote Access
+        continue-on-error: true
         shell: powershell
         run: |
           # Terminal Server
@@ -122,6 +120,7 @@ jobs:
           Restart-Service -Name TermService, sshd -Force
 
       - name: Expose Docker Daemon
+        continue-on-error: true
         shell: powershell
         run: |
           $jsonPath = "C:\ProgramData\Docker\config\daemon.json"
