@@ -19,6 +19,36 @@ jobs:
             exit 1
           }
 
+      - name: Pre-install Essential Apps
+        shell: powershell
+        run: |
+          choco install googlechrome -y --no-progress
+          # Add other apps here: choco install vscode -y --no-progress
+
+      - name: Download Previous State
+        uses: dawidd6/action-download-artifact@v3
+        continue-on-error: true
+        with:
+          name: runner-state
+          workflow: main.yml
+          branch: main
+          search_artifacts: true
+          if_no_artifact_found: warn
+
+      - name: Restore Chrome State
+        shell: powershell
+        run: |
+          $chromePath = "$env:LOCALAPPDATA\Google\Chrome\User Data"
+          if (Test-Path "chrome-state.zip") {
+              Write-Host "Restoring Chrome profile..."
+              if (-not (Test-Path $chromePath)) {
+                  New-Item -ItemType Directory -Path $chromePath -Force
+              }
+              Expand-Archive -Path "chrome-state.zip" -DestinationPath "$chromePath\.." -Force
+          } else {
+              Write-Host "No Chrome state found to restore."
+          }
+
       - name: Configure Core RDP Settings
         shell: powershell
         run: |
@@ -92,7 +122,7 @@ jobs:
           }
           Write-Host "RDP is accessible!"
 
-      - name: Maintain Connection
+      - name: Maintain Connection & Save State
         shell: powershell
         run: |
           Write-Host "`n=== RDP ACCESS DETAILS ==="
@@ -102,6 +132,28 @@ jobs:
           Write-Host "==========================`n"
 
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Session Active. Keep this tab open."
+              Write-Host "[$(Get-Date)] RDP Session Active. Use Ctrl+C or stop job to trigger State Save."
               Start-Sleep -Seconds 300
           }
+
+      - name: Save Runner State
+        if: always()
+        shell: powershell
+        run: |
+          Write-Host "Zipping Chrome User Data for persistence..."
+          $chromePath = "$env:LOCALAPPDATA\Google\Chrome\User Data"
+          
+          # Kill Chrome to release file locks before zipping
+          Stop-Process -Name "chrome" -ErrorAction SilentlyContinue
+          
+          if (Test-Path $chromePath) {
+              Compress-Archive -Path $chromePath -DestinationPath "chrome-state.zip" -Force
+          }
+
+      - name: Upload State Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-state
+          path: chrome-state.zip
+          retention-days: 7
