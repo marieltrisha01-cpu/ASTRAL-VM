@@ -26,7 +26,7 @@ jobs:
           choco install rclone -y --no-progress
           choco install git -y --no-progress
           choco install nodejs -y --no-progress
-          # Removed failing tmux and ollama from choco to use robust methods below
+          # Omitted manual AI CLI installs per user request to ensure stability
 
       - name: Install Ollama (Official Installer)
         shell: powershell
@@ -39,26 +39,7 @@ jobs:
           Start-Process -FilePath $outpath -ArgumentList "/silent" -Wait
           Write-Host "Ollama Installed."
 
-      - name: Install AI CLI Studio (Triple Checked)
-        shell: powershell
-        run: |
-          # 1. Atlassian CLI
-          Write-Host "Installing @atlassian/cli..."
-          npm install -g @atlassian/cli
-          
-          # 2. OpenCode AI
-          Write-Host "Installing opencode-ai..."
-          npm install -g opencode-ai
-          
-          # 3. Gemini CLI (Official Package)
-          Write-Host "Installing @google/gemini-cli..."
-          npm install -g @google/gemini-cli
-          
-          # 4. MiniMax CLI (Verified Wrapper)
-          Write-Host "Installing @hmbown/minimax-cli..."
-          npm install -g @hmbown/minimax-cli
-          
-          Write-Host "AI Studio CLIs installation complete."
+      # Removed "Install AI CLI Studio" step per user request to allow manual setup
 
       - name: Setup SSH Server
         shell: powershell
@@ -220,7 +201,8 @@ jobs:
           Write-Host "==========================`n"
           Write-Host "📱 TERMINAL (SSH): ssh RDP@$($env:TAILSCALE_IP)"
           Write-Host "🛡️ SAFE ZONES: C:\Work, Desktop, Documents"
-          Write-Host "🛠️ TOOLS: acli, opencode, gemini, minimax"
+          Write-Host "🛠️ TOOLS: Git, Node.js, Ollama (Pre-installed)"
+          Write-Host "👨‍💻 USER ACTION: Manually install AI CLIs (minimax, gemini, etc.) as needed."
           Write-Host "🧠 AI LAB: Qwen2.5-Coder 3B active at http://$($env:TAILSCALE_IP):11434"
           Write-Host "🛡️ AUTOMATIC PERSISTENCE: Data is safe!`n"
           
