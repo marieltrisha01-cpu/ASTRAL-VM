@@ -2,256 +2,113 @@ name: RDP
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
-  schedule:
-    - cron: '0 */5 * * *' # Every 5 hours to stay within the 6-hour runner limit
 
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 360
+    timeout-minutes: 3600
 
     steps:
-      - name: Check for Required Secrets
-        shell: powershell
+      - name: Configure Core RDP Settings
         run: |
-          if (-not "${{ secrets.TAILSCALE_AUTH_KEY }}") {
-            Write-Error "TAILSCALE_AUTH_KEY is missing! Please add it to your repository secrets."
-            exit 1
-          }
+          # Enable Remote Desktop and disable Network Level Authentication (if needed)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "SecurityLayer" -Value 0 -Force
 
-      - name: Pre-install Essential Apps
-        shell: powershell
-        run: |
-          choco install googlechrome -y --no-progress
-          choco install rclone -y --no-progress
-          choco install git -y --no-progress
-          choco install nodejs -y --no-progress
-          # Omitted manual AI CLI and Ollama installs per user request to ensure speed and stability
-
-      - name: Setup SSH Server
-        shell: powershell
-        run: |
-          Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
-          Start-Service sshd
-          Set-Service -Name sshd -StartupType 'Automatic'
-          New-NetFirewallRule -Name openssh-sshd -DisplayName 'OpenSSH Server (sshd)' -Enabled True -Direction Inbound -Protocol TCP -LocalPort 22 -Action Allow
-
-      - name: Setup Rclone
-        shell: powershell
-        run: |
-          if ("${{ secrets.RCLONE_CONFIG_DATA }}") {
-              $configPath = "$env:USERPROFILE\.config\rclone"
-              if (-not (Test-Path $configPath)) { New-Item -ItemType Directory -Path $configPath -Force }
-              "${{ secrets.RCLONE_CONFIG_DATA }}" | Out-File -FilePath "$configPath\rclone.conf" -Encoding ascii
-          }
-
-      - name: Restore from External Cloud (GDrive)
-        continue-on-error: true
-        shell: powershell
-        run: |
-          if (Test-Path "$env:USERPROFILE\.config\rclone\rclone.conf") {
-              Write-Host "Downloading latest state from GDrive..."
-              rclone copy gdrive:ASTRAL-VM-BACKUP . --include "*-state.zip"
-          }
-
-      - name: Download from GitHub Artifacts (Fallthrough)
-        uses: dawidd6/action-download-artifact@v3
-        continue-on-error: true
-        with:
-          name: runner-state
-          workflow: main.yml
-          branch: main
-          search_artifacts: true
-          if_no_artifact_found: warn
-
-      - name: Restore State & Deploy Projects
-        shell: powershell
-        run: |
-          $userFolders = @("Desktop", "Documents", "Videos", "Pictures")
-          # 1. Restore User Folders
-          foreach ($folder in $userFolders) {
-              $zipFile = "$($folder.ToLower())-state.zip"
-              if (Test-Path $zipFile) {
-                  Write-Host "Restoring $folder..."
-                  $targetPath = [System.IO.Path]::Combine($env:USERPROFILE, $folder)
-                  if (-not (Test-Path $targetPath)) { New-Item -ItemType Directory -Path $targetPath -Force }
-                  Expand-Archive -Path $zipFile -DestinationPath $targetPath -Force
-              }
-          }
-          # 2. Restore User Profile Root
-          if (Test-Path "user-profile-root-state.zip") {
-              Write-Host "Restoring User Profile Root settings..."
-              Expand-Archive -Path "user-profile-root-state.zip" -DestinationPath $env:USERPROFILE -Force
-          }
-          # 3. Handle Work-State (ASTRAL CLI, HERO, SCRAPER, etc.)
-          $workDir = "C:\Work"
-          if (-not (Test-Path $workDir)) { New-Item -ItemType Directory -Path $workDir -Force }
-          if (Test-Path "work-state.zip") {
-              Write-Host "Deploying projects to C:\Work..."
-              Expand-Archive -Path "work-state.zip" -DestinationPath $workDir -Force
-          }
-          # 4. Handle Specific beyond-infinity Zip
-          if (Test-Path "$env:USERPROFILE\Desktop\beyond-infinity-salon.zip") {
-              Write-Host "Extracting beyond-infinity-salon to Desktop..."
-              Expand-Archive -Path "$env:USERPROFILE\Desktop\beyond-infinity-salon.zip" -DestinationPath "$env:USERPROFILE\Desktop\beyond-infinity-salon" -Force
-          }
-
-      - name: Configure Core Security & Remote Access
-        continue-on-error: true
-        shell: powershell
-        run: |
-          # Terminal Server
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force | Out-Null
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force | Out-Null
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force | Out-Null
+          # Remove any existing rule with the same name to avoid duplication
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
           
-          # Firewall Rules
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
-          
-          netsh advfirewall firewall delete rule name="Docker-Remote" 2>$null
-          netsh advfirewall firewall add rule name="Docker-Remote" dir=in action=allow protocol=TCP localport=2375
-          
-          netsh advfirewall firewall delete rule name="Ollama-Remote" 2>$null
-          netsh advfirewall firewall add rule name="Ollama-Remote" dir=in action=allow protocol=TCP localport=11434
-          
-          Restart-Service -Name TermService, sshd -Force -ErrorAction SilentlyContinue
+          # For testing, allow any incoming connection on port 3389
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389
 
-      - name: Expose Docker Daemon
-        continue-on-error: true
-        shell: powershell
-        run: |
-          $jsonPath = "C:\ProgramData\Docker\config\daemon.json"
-          if (-not (Test-Path (Split-Path $jsonPath))) { New-Item -ItemType Directory -Path (Split-Path $jsonPath) -Force }
-          $config = @{ hosts = @("tcp://0.0.0.0:2375", "npipe://") }
-          $config | ConvertTo-Json | Out-File -FilePath $jsonPath -Encoding ascii
-          Restart-Service -Name docker -ErrorAction SilentlyContinue
+          # (Optional) Restart the Remote Desktop service to ensure changes take effect
+          Restart-Service -Name TermService -Force
 
-      - name: Create Managed VPS User
-        shell: powershell
+      - name: Create RDP User with Secure Password
         run: |
-          $pass = "${{ secrets.USER_PASSWORD }}"
-          if (-not $pass) {
-              $chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#%&()*+,-./:;<=>?@[\]^_`{|}~"
-              $pass = -join ((1..16) | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
+          Add-Type -AssemblyName System.Security
+          $charSet = @{
+              Upper   = [char[]](65..90)      # A-Z
+              Lower   = [char[]](97..122)     # a-z
+              Number  = [char[]](48..57)      # 0-9
+              Special = ([char[]](33..47) + [char[]](58..64) +
+                         [char[]](91..96) + [char[]](123..126)) # Special characters
           }
-          $securePass = ConvertTo-SecureString $pass -AsPlainText -Force
+          $rawPassword = @()
+          $rawPassword += $charSet.Upper | Get-Random -Count 4
+          $rawPassword += $charSet.Lower | Get-Random -Count 4
+          $rawPassword += $charSet.Number | Get-Random -Count 4
+          $rawPassword += $charSet.Special | Get-Random -Count 4
+          $password = -join ($rawPassword | Sort-Object { Get-Random })
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
           if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) { Remove-LocalUser -Name "RDP" }
           New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          "RDP_PASSWORD=$pass" | Add-Content -Path $env:GITHUB_ENV
+          
+          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
+          
+          if (-not (Get-LocalUser -Name "RDP")) {
+              Write-Error "User creation failed"
+              exit 1
+          }
 
       - name: Install Tailscale
-        shell: powershell
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.94.1.exe"
           $installerPath = "$env:TEMP\tailscale.exe"
+          
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process -FilePath $installerPath -ArgumentList "/quiet" -Wait
+          Start-Process $installerPath -ArgumentList "/quiet" -Wait
           Remove-Item $installerPath -Force
 
-      - name: Establish Tailscale Connection (Self-Healing)
-        shell: powershell
+      - name: Establish Tailscale Connection
         run: |
-          $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          # Bring up Tailscale with the provided auth key and set a unique hostname
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          
+          # Wait for Tailscale to assign an IP
+          $tsIP = $null
           $retries = 0
-          while ($retries -lt 12) {
-              Write-Host "Attempting Tailscale connection (Try $($retries + 1)/12)..."
-              & $tsExe up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-vps-$(Get-Random -Minimum 1000 -Maximum 9999)
-              $tsIP = & $tsExe ip -4
-              if ($tsIP) {
-                  "TAILSCALE_IP=$tsIP" | Add-Content -Path $env:GITHUB_ENV
-                  Write-Host "Connected! IP: $tsIP"
-                  return
-              }
-              Start-Sleep -Seconds 15
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
               $retries++
           }
-          Write-Error "Failed to connect to Tailscale after 12 attempts."; exit 1
-
-      - name: Maintain Connection & Boot Ready
-        shell: powershell
+          
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
+          }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+      
+      - name: Verify RDP Accessibility
         run: |
-          Write-Host "`n=== VPS ACCESS DETAILS ==="
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          
+          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
+          }
+          Write-Host "TCP connectivity successful!"
+
+      - name: Maintain Connection
+        run: |
+          Write-Host "`n=== RDP ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
           Write-Host "Username: RDP"
-          Write-Host "Password: $env:RDP_PASSWORD"
-          Write-Host "==========================`n"
-          Write-Host "📱 TERMINAL (SSH): ssh RDP@$($env:TAILSCALE_IP)"
-          Write-Host "🛡️ SAFE ZONES: C:\Work, Desktop, Documents"
-          Write-Host "🛠️ PRE-INSTALLED: Chrome, Rclone, Git, Node.js"
-          Write-Host "⚡ READY FOR MANUAL SETUP: Ollama, AI CLIs"
-          Write-Host "🛡️ AUTOMATIC PERSISTENCE: Active`n"
+          Write-Host "Password: $(echo $env:RDP_CREDS)"
+          Write-Host "==================`n"
           
+          # Keep runner active indefinitely (or until manually cancelled)
           while ($true) {
-              Write-Host "[$(Get-Date)] VPS Healthy. Use Ctrl+C or stop job to trigger State Save."
+              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
               Start-Sleep -Seconds 300
-          }
-
-      - name: Save Global State
-        if: always()
-        shell: powershell
-        run: |
-          Write-Host "Zipping specific folders for persistence..."
-          # Safely stop processes using taskkill to release file locks
-          taskkill /F /IM chrome.exe /T 2>$null
-          taskkill /F /IM sshd.exe /T 2>$null
-          
-          # 1. Zip User Folders
-          $userFolders = @("Desktop", "Documents", "Videos", "Pictures")
-          foreach ($folder in $userFolders) {
-              $sourcePath = [System.IO.Path]::Combine($env:USERPROFILE, $folder)
-              if (Test-Path $sourcePath) {
-                  $files = Get-ChildItem -Path "$sourcePath\*" -ErrorAction SilentlyContinue
-                  if ($files) {
-                      Write-Host "Zipping $folder..."
-                      Compress-Archive -Path "$sourcePath\*" -DestinationPath "$($folder.ToLower())-state.zip" -Force -ErrorAction SilentlyContinue
-                  }
-              }
-          }
-
-          # 2. Zip User Profile Root
-          $staging = New-Item -ItemType Directory -Path "$env:TEMP\ProfileStaging" -Force
-          $pathsToSave = @("AppData\Local\Google\Chrome\User Data", "AppData\Roaming")
-          foreach ($p in $pathsToSave) {
-              $src = Join-Path $env:USERPROFILE $p
-              if (Test-Path $src) {
-                  $dest = Join-Path $staging $p
-                  New-Item -ItemType Directory -Path (Split-Path $dest) -Force -ErrorAction SilentlyContinue
-                  Copy-Item -Path $src -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
-              }
-          }
-          $stagingFiles = Get-ChildItem -Path "$staging\*" -ErrorAction SilentlyContinue
-          if ($stagingFiles) {
-              Compress-Archive -Path "$staging\*" -DestinationPath "user-profile-root-state.zip" -Force -ErrorAction SilentlyContinue
-          }
-
-          # 3. Zip Work Folder (Projects: ASTRAL, HERO, SCRAPER, etc.)
-          if (Test-Path "C:\Work") {
-              $workFiles = Get-ChildItem -Path "C:\Work\*" -ErrorAction SilentlyContinue
-              if ($workFiles) {
-                  Compress-Archive -Path "C:\Work\*" -DestinationPath "work-state.zip" -Force -ErrorAction SilentlyContinue
-              }
-          }
-
-      - name: Upload to GitHub Artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: runner-state
-          path: |
-            *-state.zip
-          retention-days: 7
-
-      - name: Sync to External Cloud (GDrive)
-        if: always()
-        continue-on-error: true
-        shell: powershell
-        run: |
-          if (Test-Path "$env:USERPROFILE\.config\rclone\rclone.conf") {
-              Write-Host "Uploading latest state to GDrive..."
-              rclone copy . gdrive:ASTRAL-VM-BACKUP --include "*-state.zip"
           }
