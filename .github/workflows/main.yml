@@ -24,23 +24,41 @@ jobs:
         run: |
           choco install googlechrome -y --no-progress
           choco install rclone -y --no-progress
-          choco install ollama -y --no-progress
           choco install git -y --no-progress
           choco install nodejs -y --no-progress
-          # Removed tmux from choco as it is not available on windows runners via choco
+          # Removed failing tmux and ollama from choco to use robust methods below
 
-      - name: Install AI CLI Studio (Mobile Ready)
+      - name: Install Ollama (Official Installer)
         shell: powershell
         run: |
-          # Install ACLI (for rovodev)
+          Write-Host "Downloading Ollama Setup..."
+          $url = "https://ollama.com/download/OllamaSetup.exe"
+          $outpath = "$env:TEMP\OllamaSetup.exe"
+          Invoke-WebRequest -Uri $url -OutFile $outpath
+          Write-Host "Installing Ollama..."
+          Start-Process -FilePath $outpath -ArgumentList "/silent" -Wait
+          Write-Host "Ollama Installed."
+
+      - name: Install AI CLI Studio (Triple Checked)
+        shell: powershell
+        run: |
+          # 1. Atlassian CLI
+          Write-Host "Installing @atlassian/cli..."
           npm install -g @atlassian/cli
-          # Install Opencode
+          
+          # 2. OpenCode AI
+          Write-Host "Installing opencode-ai..."
           npm install -g opencode-ai
-          # Install Gemini CLI
-          npm install -g gemini-chat-cli
-          # Install Minimax CLI
-          npm install -g minimax-cli || npm install -g @minimax-ai/cli
-          Write-Host "AI Studio CLIs installed: acli, opencode, gemini, minimax"
+          
+          # 3. Gemini CLI (Official Package)
+          Write-Host "Installing @google/gemini-cli..."
+          npm install -g @google/gemini-cli
+          
+          # 4. MiniMax CLI (Verified Wrapper)
+          Write-Host "Installing @hmbown/minimax-cli..."
+          npm install -g @hmbown/minimax-cli
+          
+          Write-Host "AI Studio CLIs installation complete."
 
       - name: Setup SSH Server
         shell: powershell
@@ -185,8 +203,13 @@ jobs:
         shell: powershell
         run: |
           $env:OLLAMA_HOST = "0.0.0.0"
-          Start-Process -FilePath "ollama" -ArgumentList "serve" -WindowStyle Hidden
-          Start-Sleep -Seconds 30
+          # Wait for Ollama service (installed by installer)
+          Start-Sleep -Seconds 10
+          # If not running, attempt start
+          if (-not (Get-Process ollama -ErrorAction SilentlyContinue)) {
+             try { Start-Process "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe" -ArgumentList "serve" -WindowStyle Hidden } catch { Write-Host "Ollama start failed, skipping..." }
+          }
+          Start-Sleep -Seconds 10
           Write-Host "Pulling Qwen2.5-Coder 3B (Best for end-to-end coding)..."
           & "ollama" pull qwen2.5-coder:3b
           
