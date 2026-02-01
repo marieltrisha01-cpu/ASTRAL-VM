@@ -28,7 +28,6 @@ jobs:
           choco install rclone -y --no-progress
           choco install git -y --no-progress
           choco install nodejs -y --no-progress
-          # Omitted manual AI CLI and Ollama installs per user request to ensure speed and stability
 
       - name: Setup SSH Server
         shell: powershell
@@ -92,31 +91,26 @@ jobs:
               Write-Host "Deploying projects to C:\Work..."
               Expand-Archive -Path "work-state.zip" -DestinationPath $workDir -Force
           }
-          # 4. Handle Specific beyond-infinity Zip
-          if (Test-Path "$env:USERPROFILE\Desktop\beyond-infinity-salon.zip") {
-              Write-Host "Extracting beyond-infinity-salon to Desktop..."
-              Expand-Archive -Path "$env:USERPROFILE\Desktop\beyond-infinity-salon.zip" -DestinationPath "$env:USERPROFILE\Desktop\beyond-infinity-salon" -Force
-          }
 
       - name: Configure Core Security & Remote Access
         continue-on-error: true
         shell: powershell
         run: |
           # Terminal Server
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force | Out-Null
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force | Out-Null
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force | Out-Null
-          
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+
           # Firewall Rules
           netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
-          
+
           netsh advfirewall firewall delete rule name="Docker-Remote" 2>$null
           netsh advfirewall firewall add rule name="Docker-Remote" dir=in action=allow protocol=TCP localport=2375
-          
+
           netsh advfirewall firewall delete rule name="Ollama-Remote" 2>$null
           netsh advfirewall firewall add rule name="Ollama-Remote" dir=in action=allow protocol=TCP localport=11434
-          
+
           Restart-Service -Name TermService, sshd -Force -ErrorAction SilentlyContinue
 
       - name: Expose Docker Daemon
@@ -129,20 +123,32 @@ jobs:
           $config | ConvertTo-Json | Out-File -FilePath $jsonPath -Encoding ascii
           Restart-Service -Name docker -ErrorAction SilentlyContinue
 
-      - name: Create Managed VPS User
+      - name: Create Managed VPS User (Enhanced Security)
         shell: powershell
         run: |
-          $pass = "${{ secrets.USER_PASSWORD }}"
-          if (-not $pass) {
-              $chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#%&()*+,-./:;<=>?@[\]^_`{|}~"
-              $pass = -join ((1..16) | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
+          # Use requested secure password generation
+          Add-Type -AssemblyName System.Security
+          $charSet = @{
+              Upper   = [char[]](65..90)      # A-Z
+              Lower   = [char[]](97..122)     # a-z
+              Number  = [char[]](48..57)      # 0-9
+              Special = ([char[]](33..47) + [char[]](58..64) +
+                         [char[]](91..96) + [char[]](123..126))
           }
-          $securePass = ConvertTo-SecureString $pass -AsPlainText -Force
+          $rawPassword = @()
+          $rawPassword += $charSet.Upper | Get-Random -Count 4
+          $rawPassword += $charSet.Lower | Get-Random -Count 4
+          $rawPassword += $charSet.Number | Get-Random -Count 4
+          $rawPassword += $charSet.Special | Get-Random -Count 4
+          $password = -join ($rawPassword | Sort-Object { Get-Random })
+          
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
           if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) { Remove-LocalUser -Name "RDP" }
           New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          "RDP_PASSWORD=$pass" | Add-Content -Path $env:GITHUB_ENV
+          
+          "RDP_PASSWORD=$password" | Add-Content -Path $env:GITHUB_ENV
 
       - name: Install Tailscale
         shell: powershell
@@ -185,7 +191,7 @@ jobs:
           Write-Host "🛠️ PRE-INSTALLED: Chrome, Rclone, Git, Node.js"
           Write-Host "⚡ READY FOR MANUAL SETUP: Ollama, AI CLIs"
           Write-Host "🛡️ AUTOMATIC PERSISTENCE: Active`n"
-          
+
           while ($true) {
               Write-Host "[$(Get-Date)] VPS Healthy. Use Ctrl+C or stop job to trigger State Save."
               Start-Sleep -Seconds 300
@@ -199,7 +205,7 @@ jobs:
           # Safely stop processes using taskkill to release file locks
           taskkill /F /IM chrome.exe /T 2>$null
           taskkill /F /IM sshd.exe /T 2>$null
-          
+
           # 1. Zip User Folders
           $userFolders = @("Desktop", "Documents", "Videos", "Pictures")
           foreach ($folder in $userFolders) {
@@ -231,7 +237,7 @@ jobs:
 
           # 3. Zip Work Folder (Projects: ASTRAL, HERO, SCRAPER, etc.)
           if (Test-Path "C:\Work") {
-              $workFiles = Get-ChildItem -Path "C:\Work\*" -ErrorAction SilentlyContinue
+              $workFiles = Get-ChildItem -Path "C:\Work\*\" -ErrorAction SilentlyContinue
               if ($workFiles) {
                   Compress-Archive -Path "C:\Work\*" -DestinationPath "work-state.zip" -Force -ErrorAction SilentlyContinue
               }
