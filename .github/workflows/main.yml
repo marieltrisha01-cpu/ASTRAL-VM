@@ -98,10 +98,10 @@ jobs:
               Expand-Archive -Path "user-profile-root-state.zip" -DestinationPath $env:USERPROFILE -Force
           }
           # 3. Handle Work-State (ASTRAL CLI, HERO, SCRAPER, etc.)
+          $workDir = "C:\Work"
+          if (-not (Test-Path $workDir)) { New-Item -ItemType Directory -Path $workDir -Force }
           if (Test-Path "work-state.zip") {
               Write-Host "Deploying projects to C:\Work..."
-              $workDir = "C:\Work"
-              if (-not (Test-Path $workDir)) { New-Item -ItemType Directory -Path $workDir -Force }
               Expand-Archive -Path "work-state.zip" -DestinationPath $workDir -Force
           }
           # 4. Handle Specific beyond-infinity Zip
@@ -156,10 +156,10 @@ jobs:
       - name: Install Tailscale
         shell: powershell
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.94.1.exe"
+          $installerPath = "$env:TEMP\tailscale.exe"
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Start-Process -FilePath $installerPath -ArgumentList "/quiet" -Wait
           Remove-Item $installerPath -Force
 
       - name: Establish Tailscale Connection (Self-Healing)
@@ -186,7 +186,7 @@ jobs:
         run: |
           $env:OLLAMA_HOST = "0.0.0.0"
           Start-Process -FilePath "ollama" -ArgumentList "serve" -WindowStyle Hidden
-          Start-Sleep -Seconds 10
+          Start-Sleep -Seconds 30
           Write-Host "Pulling Qwen2.5-Coder 3B (Best for end-to-end coding)..."
           & "ollama" pull qwen2.5-coder:3b
           
@@ -196,6 +196,7 @@ jobs:
           Write-Host "Password: $env:RDP_PASSWORD"
           Write-Host "==========================`n"
           Write-Host "📱 TERMINAL (SSH): ssh RDP@$($env:TAILSCALE_IP)"
+          Write-Host "🛡️ SAFE ZONES: C:\Work, Desktop, Documents"
           Write-Host "🛠️ TOOLS: acli, opencode, gemini, minimax"
           Write-Host "🧠 AI LAB: Qwen2.5-Coder 3B active at http://$($env:TAILSCALE_IP):11434"
           Write-Host "🛡️ AUTOMATIC PERSISTENCE: Data is safe!`n"
