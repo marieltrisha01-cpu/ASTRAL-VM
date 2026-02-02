@@ -94,20 +94,20 @@ jobs:
           Write-Host "Quick restore for fast startup..." -ForegroundColor Cyan
           if ($env:HAS_RCLONE -ne 'true') { return }
 
-          # Check if incremental sync exists (from continuous backup)
-          $useSyncRestore = rclone ls "terabox:vm-sync/" 2>$null
+          # Check if incremental sync exists (from continuous backup) - Using Google Drive
+          $useSyncRestore = rclone ls "gdrive:astral-vm-backup/vm-sync/" 2>$null
           
           if ($useSyncRestore) {
               Write-Host "Using incremental sync restore (faster)..." -ForegroundColor Green
               
               # Restore from vm-sync (incremental backups)
-              rclone sync "terabox:vm-sync/Desktop" "$env:USERPROFILE\Desktop" --fast-list --quiet
-              rclone sync "terabox:vm-sync/Documents" "$env:USERPROFILE\Documents" --fast-list --quiet
-              rclone sync "terabox:vm-sync/AppData" "$env:APPDATA" --fast-list --quiet
+              rclone sync "gdrive:astral-vm-backup/vm-sync/Desktop" "$env:USERPROFILE\Desktop" --fast-list --quiet
+              rclone sync "gdrive:astral-vm-backup/vm-sync/Documents" "$env:USERPROFILE\Documents" --fast-list --quiet
+              rclone sync "gdrive:astral-vm-backup/vm-sync/AppData" "$env:APPDATA" --fast-list --quiet
               
               # Registry
-              if (rclone ls "terabox:vm-sync/*.reg" 2>$null) {
-                  rclone copy "terabox:vm-sync/" . --include "*.reg" --quiet
+              if (rclone ls "gdrive:astral-vm-backup/vm-sync/*.reg" 2>$null) {
+                  rclone copy "gdrive:astral-vm-backup/vm-sync/" . --include "*.reg" --quiet
                   reg import "temp-reg-backup.reg" 2>$null
                   Remove-Item "temp-reg-backup.reg" -Force -ErrorAction SilentlyContinue
               }
@@ -115,25 +115,7 @@ jobs:
               Write-Host "✅ Fast incremental restore complete" -ForegroundColor Green
           } else {
               # Fallback to legacy zip restore
-              Write-Host "Using legacy restore method..." -ForegroundColor Yellow
-              $targets = @("desktop", "documents", "tailscale-state", "registry-state")
-              foreach ($t in $targets) {
-                  $ext = if ($t -eq "registry-state") { "reg" } else { "zip" }
-                  if (rclone ls "terabox:$t.$ext" 2>$null) {
-                      rclone copy "terabox:$t.$ext" . --quiet
-                      if ($t -eq "registry-state") {
-                          reg import "$t.reg" 2>$null
-                      } elseif ($t -eq "tailscale-state") {
-                          Expand-Archive -Path "$t.zip" -DestinationPath "C:\temp-restore\$t" -Force
-                          Copy-Item "C:\temp-restore\$t\*" "$env:ProgramData\Tailscale" -Recurse -Force
-                      } else {
-                          Expand-Archive -Path "$t.zip" -DestinationPath "C:\temp-restore\$t" -Force
-                          $dest = [System.IO.Path]::Combine($env:USERPROFILE, $t.Replace("-state",""))
-                          Copy-Item "C:\temp-restore\$t\*" $dest -Recurse -Force
-                      }
-                      Remove-Item "$t.$ext" -Force -ErrorAction SilentlyContinue
-                  }
-              }
+              Write-Host "No previous backup found. Starting fresh..." -ForegroundColor Yellow
           }
 
       - name: Create Managed VPS User
@@ -172,7 +154,7 @@ jobs:
           $shortcut.Arguments = "-ExecutionPolicy Bypass -File `"$env:GITHUB_WORKSPACE\restore-full-system.ps1`""
           $shortcut.WorkingDirectory = "$env:USERPROFILE"
           $shortcut.IconLocation = "imageres.dll,78"
-          $shortcut.Description = "Restore complete system backup from Terabox"
+          $shortcut.Description = "Restore complete system backup from Google Drive"
           $shortcut.Save()
           
           Write-Host "✅ Desktop shortcuts created"
@@ -211,7 +193,7 @@ jobs:
           Write-Host "User: RDP" -ForegroundColor Green
           Write-Host "Pass: $env:RDP_PASSWORD" -ForegroundColor Green
           Write-Host "=========================" -ForegroundColor Cyan
-          Write-Host "`n💾 Auto-backup: Running every 30 minutes" -ForegroundColor Yellow
+          Write-Host "`n💾 Auto-backup: Running every 30 minutes to Google Drive" -ForegroundColor Yellow
           Write-Host "🔄 To restore installed programs, double-click:" -ForegroundColor Yellow
           Write-Host "   '🔄 Restore Full System' on the Desktop" -ForegroundColor Yellow
           Write-Host ""
@@ -256,16 +238,16 @@ jobs:
           Write-Host "`n=== Final Sync Before Restart ===" -ForegroundColor Cyan
           if ($env:HAS_RCLONE -ne 'true') { return }
 
-          # The continuous backup has been syncing, just do one final push
-          Write-Host "Performing final incremental sync..." -ForegroundColor Yellow
+          # The continuous backup has been syncing, just do one final push to Google Drive
+          Write-Host "Performing final incremental sync to Google Drive..." -ForegroundColor Yellow
           
-          rclone sync "$env:USERPROFILE\Desktop" "terabox:vm-sync/Desktop" --fast-list --quiet
-          rclone sync "$env:USERPROFILE\Documents" "terabox:vm-sync/Documents" --fast-list --quiet
-          rclone sync "$env:APPDATA" "terabox:vm-sync/AppData" --exclude "*.tmp" --exclude "Temp/**" --fast-list --quiet
+          rclone sync "$env:USERPROFILE\Desktop" "gdrive:astral-vm-backup/vm-sync/Desktop" --fast-list --quiet
+          rclone sync "$env:USERPROFILE\Documents" "gdrive:astral-vm-backup/vm-sync/Documents" --fast-list --quiet
+          rclone sync "$env:APPDATA" "gdrive:astral-vm-backup/vm-sync/AppData" --exclude "*.tmp" --exclude "Temp/**" --fast-list --quiet
           
           # Registry
           reg export "HKCU\Software" "C:\temp-reg-backup.reg" /y 2>$null
-          rclone copy "C:\temp-reg-backup.reg" "terabox:vm-sync/" --quiet
+          rclone copy "C:\temp-reg-backup.reg" "gdrive:astral-vm-backup/vm-sync/" --quiet
           
           Write-Host "✅ Final sync complete" -ForegroundColor Green
 
@@ -279,7 +261,7 @@ jobs:
           if ($env:HAS_RCLONE -ne 'true') { return }
 
           # Only create full backup once per week (expensive operation)
-          $lastBackup = rclone lsl "terabox:full-system-backup.zip" 2>$null | Select-Object -First 1
+          $lastBackup = rclone lsl "gdrive:astral-vm-backup/full-system-backup.zip" 2>$null | Select-Object -First 1
           if ($lastBackup) {
               $backupDate = [datetime]::ParseExact(($lastBackup -split '\s+')[0..1] -join ' ', 'yyyy-MM-dd HH:mm:ss', $null)
               $daysSince = ((Get-Date) - $backupDate).Days
@@ -290,13 +272,13 @@ jobs:
               }
           }
           
-          Write-Host "Creating full system snapshot (this may take time)..." -ForegroundColor Yellow
+          Write-Host "Creating full system snapshot to Google Drive (this may take time)..." -ForegroundColor Yellow
           $usersPath = "C:\Users"
           $backupPath = "C:\temp-backup-full"
           
           try {
               Compress-Archive -Path "$usersPath\*" -DestinationPath "$backupPath\full-system-backup.zip" -CompressionLevel Fastest -Force -ErrorAction SilentlyContinue
-              rclone copy "$backupPath\full-system-backup.zip" "terabox:" --progress
+              rclone copy "$backupPath\full-system-backup.zip" "gdrive:astral-vm-backup/" --progress
               Write-Host "✅ Full snapshot saved" -ForegroundColor Green
               Remove-Item $backupPath -Recurse -Force -ErrorAction SilentlyContinue
           } catch {
