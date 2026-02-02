@@ -51,32 +51,34 @@ jobs:
           ${{ secrets.RCLONE_CONFIG }}
           "@
 
-      - name: Restore Global State (Data Persistence)
+      - name: Restore Global State (Extended Persistence)
         shell: powershell
         run: |
           Write-Host "Checking for existing state on Drive..."
-          # Only attempt restore if config is provided
-          if (-not "${{ secrets.RCLONE_CONFIG }}") { Write-Host "No Rclone config found, skipping restore."; return }
+          if (-not "${{ secrets.RCLONE_CONFIG }}") { return }
 
-          # Target folders for persistence
-          $targets = @("desktop", "documents", "tailscale-state")
+          # Targets for persistence (Files + Settings)
+          $targets = @("desktop", "documents", "tailscale-state", "appdata-state", "registry-state")
           foreach ($t in $targets) {
-              if (rclone ls "drive:$t-state.zip" 2>$null) {
+              $ext = if ($t -eq "registry-state") { "reg" } else { "zip" }
+              if (rclone ls "drive:$t.$ext" 2>$null) {
                   Write-Host "Restoring $t..."
-                  rclone copy "drive:$t-state.zip" .
-                  Expand-Archive -Path "$t-state.zip" -DestinationPath "C:\temp-restore\$t" -Force
-
-                  # Move tailored files back to their source
-                  if ($t -eq "tailscale-state") {
-                      $tsPath = "$env:ProgramData\Tailscale"
-                      if (Test-Path "C:\temp-restore\$t") {
-                          Copy-Item "C:\temp-restore\$t\*" $tsPath -Recurse -Force
-                      }
+                  rclone copy "drive:$t.$ext" .
+                  
+                  if ($t -eq "registry-state") {
+                      reg import "$t.reg"
+                  } elseif ($t -eq "appdata-state") {
+                      Expand-Archive -Path "$t.zip" -DestinationPath "C:\temp-restore\AppData" -Force
+                      Copy-Item "C:\temp-restore\AppData\*" $env:APPDATA -Recurse -Force
+                  } elseif ($t -eq "tailscale-state") {
+                      Expand-Archive -Path "$t.zip" -DestinationPath "C:\temp-restore\$t" -Force
+                      Copy-Item "C:\temp-restore\$t\*" "$env:ProgramData\Tailscale" -Recurse -Force
                   } else {
-                      $dest = [System.IO.Path]::Combine($env:USERPROFILE, $t)
+                      Expand-Archive -Path "$t.zip" -DestinationPath "C:\temp-restore\$t" -Force
+                      $dest = [System.IO.Path]::Combine($env:USERPROFILE, $t.Replace("-state",""))
                       Copy-Item "C:\temp-restore\$t\*" $dest -Recurse -Force
                   }
-                  Remove-Item "$t-state.zip" -Force
+                  Remove-Item "$t.$ext" -Force
               }
           }
 
@@ -137,6 +139,7 @@ jobs:
           while ($elapsed -lt $timerSeconds) {
               Start-Sleep -Seconds 300
               $elapsed += 300
+              # Optional: Add small vibration/activity to prevent RDP idle disconnect
           }
 
           # Trigger Next Run (Daisy Chain)
@@ -157,25 +160,35 @@ jobs:
               } catch {
                   Write-Warning "Failed to trigger run: $_"
               }
-          } else {
-              Write-Warning "GH_PAT secret missing. Auto-restart skipped."
           }
 
-      - name: Save Global State (Cleanup Policy)
+      - name: Save Global State (Settings & Data)
         if: always()
         shell: powershell
         run: |
           Write-Host "Saving state for persistence..."
           if (-not "${{ secrets.RCLONE_CONFIG }}") { return }
 
-          # 1. Save Tailscale login state (Crucial to avoid node limit)
+          # 1. Save Tailscale state
           $tsState = "$env:ProgramData\Tailscale"
           if (Test-Path $tsState) {
               Compress-Archive -Path "$tsState\*" -DestinationPath "tailscale-state.zip" -Force
               rclone copy "tailscale-state.zip" "drive:"
           }
 
-          # 2. Save User Folders
+          # 2. Save Registry Settings (User Software Hive)
+          Write-Host "Exporting registry settings..."
+          reg export "HKCU\Software" "registry-state.reg" /y
+          rclone copy "registry-state.reg" "drive:"
+
+          # 3. Save AppData (Roaming)
+          if (Test-Path $env:APPDATA) {
+              Write-Host "Compressing AppData..."
+              Compress-Archive -Path "$env:APPDATA\*" -DestinationPath "appdata-state.zip" -Force
+              rclone copy "appdata-state.zip" "drive:"
+          }
+
+          # 4. Save User Folders (Desktop, Documents)
           $userFolders = @("Desktop", "Documents")
           foreach ($folder in $userFolders) {
               $source = [System.IO.Path]::Combine($env:USERPROFILE, $folder)
