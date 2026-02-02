@@ -76,10 +76,10 @@ jobs:
           $targets = @("desktop", "documents", "tailscale-state", "appdata-state", "registry-state")
           foreach ($t in $targets) {
               $ext = if ($t -eq "registry-state") { "reg" } else { "zip" }
-              if (rclone ls "drive:$t.$ext" 2>$null) {
+              if (rclone ls "gdrive:$t.$ext" 2>$null) {
                   Write-Host "Restoring $t..."
                   try {
-                      rclone copy "drive:$t.$ext" .
+                      rclone copy "gdrive:$t.$ext" .
                       if ($t -eq "registry-state") {
                           reg import "$t.reg"
                       } elseif ($t -eq "appdata-state") {
@@ -192,21 +192,21 @@ jobs:
               $tsState = "$env:ProgramData\Tailscale"
               if (Test-Path $tsState) {
                   Compress-Archive -Path "$tsState\*" -DestinationPath "tailscale-state.zip" -Force
-                  rclone copy "tailscale-state.zip" "drive:"
+                  rclone copy "tailscale-state.zip" "gdrive:"
               }
           } catch { Write-Warning "Tailscale save failed: $_" }
 
           # 2. Save Registry Settings (User Software Hive)
           try {
               reg export "HKCU\Software" "registry-state.reg" /y
-              rclone copy "registry-state.reg" "drive:"
+              rclone copy "registry-state.reg" "gdrive:"
           } catch { Write-Warning "Registry save failed: $_" }
 
           # 3. Save AppData (Roaming) - Only high-value folders
           try {
               if (Test-Path $env:APPDATA) {
                   Compress-Archive -Path "$env:APPDATA\*" -DestinationPath "appdata-state.zip" -Force -ErrorAction SilentlyContinue
-                  rclone copy "appdata-state.zip" "drive:"
+                  rclone copy "appdata-state.zip" "gdrive:"
               }
           } catch { Write-Warning "AppData save failed: $_" }
 
@@ -217,7 +217,7 @@ jobs:
                   $source = [System.IO.Path]::Combine($env:USERPROFILE, $folder)
                   if (Test-Path $source) {
                       Compress-Archive -Path "$source\*" -DestinationPath "$($folder.ToLower())-state.zip" -Force
-                      rclone copy "$($folder.ToLower())-state.zip" "drive:"
+                      rclone copy "$($folder.ToLower())-state.zip" "gdrive:"
                   }
               } catch { Write-Warning "$folder save failed: $_" }
           }
