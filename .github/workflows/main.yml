@@ -11,18 +11,35 @@ jobs:
     steps:
       - name: Pre-Flight Verification (Hardening)
         shell: powershell
+        env:
+          HAS_TAILSCALE: ${{ secrets.TAILSCALE_AUTH_KEY != '' }}
+          HAS_RCLONE: ${{ secrets.RCLONE_CONFIG != '' }}
+          HAS_PAT: ${{ secrets.GH_PAT != '' }}
         run: |
           $secretsCount = 0
-          if ("${{ secrets.TAILSCALE_AUTH_KEY }}") { Write-Host "✅ Tailscale Key Found"; $secretsCount++ }
-          else { Write-Warning "❌ Tailscale Key Missing" }
+          
+          if ($env:HAS_TAILSCALE -eq 'true') { 
+              Write-Host "✅ Tailscale Key Found"; $secretsCount++ 
+          } else { 
+              Write-Warning "❌ Tailscale Key Missing" 
+          }
 
-          if ("${{ secrets.RCLONE_CONFIG }}") { Write-Host "✅ Rclone Config Found"; $secretsCount++ }
-          else { Write-Warning "❌ Rclone Config Missing (Save/Restore will fail)" }
+          if ($env:HAS_RCLONE -eq 'true') { 
+              Write-Host "✅ Rclone Config Found"; $secretsCount++ 
+          } else { 
+              Write-Warning "❌ Rclone Config Missing (Save/Restore will fail)" 
+          }
 
-          if ("${{ secrets.GH_PAT }}") { Write-Host "✅ GH_PAT Found (Auto-Restart enabled)" }
-          else { Write-Warning "⚠️ GH_PAT Missing (VM will only run 6 hours)" }
+          if ($env:HAS_PAT -eq 'true') { 
+              Write-Host "✅ GH_PAT Found (Auto-Restart enabled)" 
+          } else { 
+              Write-Warning "⚠️ GH_PAT Missing (VM will only run 6 hours)" 
+          }
 
-          if ($secretsCount -lt 2) { Write-Error "Critical secrets missing. Stopping to prevent data loss."; exit 1 }
+          if ($secretsCount -lt 2) { 
+              Write-Error "Critical secrets missing. Stopping to prevent data loss."
+              exit 1 
+          }
 
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -71,9 +88,11 @@ jobs:
 
       - name: Restore Quick State (Fast Startup)
         shell: powershell
+        env:
+          HAS_RCLONE: ${{ secrets.RCLONE_CONFIG != '' }}
         run: |
           Write-Host "Quick restore for fast startup..." -ForegroundColor Cyan
-          if (-not "${{ secrets.RCLONE_CONFIG }}") { return }
+          if ($env:HAS_RCLONE -ne 'true') { return }
 
           # Check if incremental sync exists (from continuous backup)
           $useSyncRestore = rclone ls "terabox:vm-sync/" 2>$null
@@ -231,9 +250,11 @@ jobs:
       - name: Final Sync Before Restart
         if: always()
         shell: powershell
+        env:
+          HAS_RCLONE: ${{ secrets.RCLONE_CONFIG != '' }}
         run: |
           Write-Host "`n=== Final Sync Before Restart ===" -ForegroundColor Cyan
-          if (-not "${{ secrets.RCLONE_CONFIG }}") { return }
+          if ($env:HAS_RCLONE -ne 'true') { return }
 
           # The continuous backup has been syncing, just do one final push
           Write-Host "Performing final incremental sync..." -ForegroundColor Yellow
@@ -251,9 +272,11 @@ jobs:
       - name: Create Full System Snapshot (Weekly)
         if: always()
         shell: powershell
+        env:
+          HAS_RCLONE: ${{ secrets.RCLONE_CONFIG != '' }}
         run: |
           Write-Host "`n=== Weekly Full Snapshot ===" -ForegroundColor Cyan
-          if (-not "${{ secrets.RCLONE_CONFIG }}") { return }
+          if ($env:HAS_RCLONE -ne 'true') { return }
 
           # Only create full backup once per week (expensive operation)
           $lastBackup = rclone lsl "terabox:full-system-backup.zip" 2>$null | Select-Object -First 1
