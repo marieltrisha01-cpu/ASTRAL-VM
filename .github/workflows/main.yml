@@ -69,17 +69,17 @@ jobs:
       - name: Restore Global State (Extended Persistence)
         shell: powershell
         run: |
-          Write-Host "Checking for existing state on Drive..."
+          Write-Host "Checking for existing state on Terabox..."
           if (-not "${{ secrets.RCLONE_CONFIG }}") { return }
 
           # Targets for persistence (Files + Settings)
           $targets = @("desktop", "documents", "tailscale-state", "appdata-state", "registry-state")
           foreach ($t in $targets) {
               $ext = if ($t -eq "registry-state") { "reg" } else { "zip" }
-              if (rclone ls "gdrive:$t.$ext" 2>$null) {
+              if (rclone ls "terabox:$t.$ext" 2>$null) {
                   Write-Host "Restoring $t..."
                   try {
-                      rclone copy "gdrive:$t.$ext" .
+                      rclone copy "terabox:$t.$ext" .
                       if ($t -eq "registry-state") {
                           reg import "$t.reg"
                       } elseif ($t -eq "appdata-state") {
@@ -184,7 +184,7 @@ jobs:
         if: always()
         shell: powershell
         run: |
-          Write-Host "Saving state for persistence..."
+          Write-Host "Saving state to Terabox..."
           if (-not "${{ secrets.RCLONE_CONFIG }}") { return }
 
           # 1. Save Tailscale state
@@ -192,21 +192,21 @@ jobs:
               $tsState = "$env:ProgramData\Tailscale"
               if (Test-Path $tsState) {
                   Compress-Archive -Path "$tsState\*" -DestinationPath "tailscale-state.zip" -Force
-                  rclone copy "tailscale-state.zip" "gdrive:"
+                  rclone copy "tailscale-state.zip" "terabox:"
               }
           } catch { Write-Warning "Tailscale save failed: $_" }
 
           # 2. Save Registry Settings (User Software Hive)
           try {
               reg export "HKCU\Software" "registry-state.reg" /y
-              rclone copy "registry-state.reg" "gdrive:"
+              rclone copy "registry-state.reg" "terabox:"
           } catch { Write-Warning "Registry save failed: $_" }
 
           # 3. Save AppData (Roaming) - Only high-value folders
           try {
               if (Test-Path $env:APPDATA) {
                   Compress-Archive -Path "$env:APPDATA\*" -DestinationPath "appdata-state.zip" -Force -ErrorAction SilentlyContinue
-                  rclone copy "appdata-state.zip" "gdrive:"
+                  rclone copy "appdata-state.zip" "terabox:"
               }
           } catch { Write-Warning "AppData save failed: $_" }
 
@@ -217,7 +217,7 @@ jobs:
                   $source = [System.IO.Path]::Combine($env:USERPROFILE, $folder)
                   if (Test-Path $source) {
                       Compress-Archive -Path "$source\*" -DestinationPath "$($folder.ToLower())-state.zip" -Force
-                      rclone copy "$($folder.ToLower())-state.zip" "gdrive:"
+                      rclone copy "$($folder.ToLower())-state.zip" "terabox:"
                   }
               } catch { Write-Warning "$folder save failed: $_" }
           }
