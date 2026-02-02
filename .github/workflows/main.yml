@@ -61,13 +61,13 @@ jobs:
 
       - name: Setup Rclone Configuration
         shell: powershell
+        env:
+          RCLONE_CONFIG_CONTENT: ${{ secrets.RCLONE_CONFIG }}
         run: |
-          # Write the rclone config from secrets
+          # Write the rclone config from secrets using environment variable (avoids escaping issues)
           $configPath = [System.IO.Path]::Combine($env:AppData, "rclone", "rclone.conf")
           New-Item -ItemType Directory -Path (Split-Path $configPath) -Force | Out-Null
-          Set-Content -Path $configPath -Value @"
-          ${{ secrets.RCLONE_CONFIG }}
-          "@
+          $env:RCLONE_CONFIG_CONTENT | Set-Content -Path $configPath -Encoding UTF8
 
       - name: Restore Quick State (Fast Startup)
         shell: powershell
