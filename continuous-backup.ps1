@@ -1,5 +1,5 @@
 # Continuous Incremental Backup Script
-# This runs in the background and syncs only CHANGED files to Terabox
+# This runs in the background and syncs only CHANGED files to Google Drive
 # Much faster than full re-compression each time
 
 param(
@@ -9,7 +9,7 @@ param(
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "  ASTRAL-VM Continuous Backup Active" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "Syncing changed files every $IntervalMinutes minutes..." -ForegroundColor Yellow
+Write-Host "Syncing changed files every $IntervalMinutes minutes to Google Drive..." -ForegroundColor Yellow
 Write-Host "This runs silently in the background." -ForegroundColor Yellow
 Write-Host ""
 
@@ -26,7 +26,7 @@ while ($true) {
     
     foreach ($target in $syncTargets.Keys) {
         $sourcePath = $syncTargets[$target]
-        $remotePath = "terabox:vm-sync/$target"
+        $remotePath = "gdrive:astral-vm-backup/vm-sync/$target"
         
         try {
             # rclone sync only uploads NEW or CHANGED files (incremental)
@@ -41,7 +41,7 @@ while ($true) {
     # Registry snapshot (small, always updated)
     try {
         reg export "HKCU\Software" "C:\temp-reg-backup.reg" /y 2>$null
-        rclone copy "C:\temp-reg-backup.reg" "terabox:vm-sync/" --quiet
+        rclone copy "C:\temp-reg-backup.reg" "gdrive:astral-vm-backup/vm-sync/" --quiet
         Remove-Item "C:\temp-reg-backup.reg" -Force -ErrorAction SilentlyContinue
     } catch { }
     
