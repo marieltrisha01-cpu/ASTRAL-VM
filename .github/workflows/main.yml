@@ -24,6 +24,9 @@ jobs:
 
           if ($secretsCount -lt 2) { Write-Error "Critical secrets missing. Stopping to prevent data loss."; exit 1 }
 
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
       - name: Configure Core RDP Settings
         shell: powershell
         run: |
@@ -66,25 +69,22 @@ jobs:
           ${{ secrets.RCLONE_CONFIG }}
           "@
 
-      - name: Restore Global State (Extended Persistence)
+      - name: Restore Quick State (Fast Startup)
         shell: powershell
         run: |
-          Write-Host "Checking for existing state on Terabox..."
+          Write-Host "Quick restore for fast startup..." -ForegroundColor Cyan
           if (-not "${{ secrets.RCLONE_CONFIG }}") { return }
 
-          # Targets for persistence (Files + Settings)
-          $targets = @("desktop", "documents", "tailscale-state", "appdata-state", "registry-state")
+          # Only restore lightweight state for fast boot
+          $targets = @("desktop", "documents", "tailscale-state", "registry-state")
           foreach ($t in $targets) {
               $ext = if ($t -eq "registry-state") { "reg" } else { "zip" }
               if (rclone ls "terabox:$t.$ext" 2>$null) {
                   Write-Host "Restoring $t..."
                   try {
-                      rclone copy "terabox:$t.$ext" .
+                      rclone copy "terabox:$t.$ext" . --quiet
                       if ($t -eq "registry-state") {
-                          reg import "$t.reg"
-                      } elseif ($t -eq "appdata-state") {
-                          Expand-Archive -Path "$t.zip" -DestinationPath "C:\temp-restore\AppData" -Force
-                          Copy-Item "C:\temp-restore\AppData\*" $env:APPDATA -Recurse -Force -ErrorAction SilentlyContinue
+                          reg import "$t.reg" 2>$null
                       } elseif ($t -eq "tailscale-state") {
                           Expand-Archive -Path "$t.zip" -DestinationPath "C:\temp-restore\$t" -Force
                           Copy-Item "C:\temp-restore\$t\*" "$env:ProgramData\Tailscale" -Recurse -Force
@@ -93,9 +93,9 @@ jobs:
                           $dest = [System.IO.Path]::Combine($env:USERPROFILE, $t.Replace("-state",""))
                           Copy-Item "C:\temp-restore\$t\*" $dest -Recurse -Force
                       }
-                      Write-Host "✅ $t restored successfully."
+                      Write-Host "✅ $t restored"
                   } catch {
-                      Write-Warning "⚠️ Failed to restore $t: $_"
+                      Write-Warning "⚠️ $t restore failed: $_"
                   }
                   Remove-Item "$t.$ext" -Force -ErrorAction SilentlyContinue
               }
@@ -125,6 +125,23 @@ jobs:
 
           "RDP_PASSWORD=$password" | Add-Content -Path $env:GITHUB_ENV
 
+      - name: Setup Desktop Shortcuts
+        shell: powershell
+        run: |
+          $desktop = [System.IO.Path]::Combine($env:USERPROFILE, "Desktop")
+          
+          # Create shortcut for Full System Restore
+          $WshShell = New-Object -ComObject WScript.Shell
+          $shortcut = $WshShell.CreateShortcut("$desktop\🔄 Restore Full System.lnk")
+          $shortcut.TargetPath = "powershell.exe"
+          $shortcut.Arguments = "-ExecutionPolicy Bypass -File `"$env:GITHUB_WORKSPACE\restore-full-system.ps1`""
+          $shortcut.WorkingDirectory = "$env:USERPROFILE"
+          $shortcut.IconLocation = "imageres.dll,78"
+          $shortcut.Description = "Restore complete system backup from Terabox"
+          $shortcut.Save()
+          
+          Write-Host "✅ Desktop shortcuts created"
+
       - name: Establish Connection (Tailscale)
         shell: powershell
         run: |
@@ -143,17 +160,20 @@ jobs:
       - name: Work Session (Loop with Auto-Restart)
         shell: powershell
         run: |
-          Write-Host "`n=== RDP LOGIN DETAILS ==="
-          Write-Host "IP: $env:TAILSCALE_IP"
-          Write-Host "User: RDP"
-          Write-Host "Pass: $env:RDP_PASSWORD"
-          Write-Host "=========================`n"
+          Write-Host "`n=== RDP LOGIN DETAILS ===" -ForegroundColor Cyan
+          Write-Host "IP: $env:TAILSCALE_IP" -ForegroundColor Green
+          Write-Host "User: RDP" -ForegroundColor Green
+          Write-Host "Pass: $env:RDP_PASSWORD" -ForegroundColor Green
+          Write-Host "=========================" -ForegroundColor Cyan
+          Write-Host "`nℹ️  To restore installed programs, double-click:" -ForegroundColor Yellow
+          Write-Host "   '🔄 Restore Full System' on the Desktop" -ForegroundColor Yellow
+          Write-Host ""
 
           # Timer for Daisy Chain (5 hours 45 mins = 20700 seconds)
           $timerSeconds = 20700
-          Write-Host "Session active. Auto-restart triggered in 5 hours 45 minutes..."
+          Write-Host "Session active. Auto-restart in 5h 45m..." -ForegroundColor Cyan
           
-          # Sleep in increments to avoid hanging
+          # Sleep in increments
           $elapsed = 0
           while ($elapsed -lt $timerSeconds) {
               Start-Sleep -Seconds 300
@@ -161,7 +181,7 @@ jobs:
           }
 
           # Trigger Next Run (Daisy Chain)
-          Write-Host "Triggering next run via API..."
+          Write-Host "`nTriggering next run via API..." -ForegroundColor Yellow
           $repo = "$env:GITHUB_REPOSITORY"
           $token = "${{ secrets.GH_PAT }}"
 
@@ -174,51 +194,70 @@ jobs:
               }
               try {
                   Invoke-RestMethod -Uri $url -Method Post -Headers $headers -Body $body
-                  Write-Host "Successfully triggered next run."
+                  Write-Host "✅ Next run triggered successfully" -ForegroundColor Green
               } catch {
                   Write-Warning "Failed to trigger run: $_"
               }
           }
 
-      - name: Save Global State (Fail-Safe Policy)
+      - name: Save Full System Backup
         if: always()
         shell: powershell
         run: |
-          Write-Host "Saving state to Terabox..."
+          Write-Host "`n=== Creating Full System Backup ===" -ForegroundColor Cyan
           if (-not "${{ secrets.RCLONE_CONFIG }}") { return }
 
-          # 1. Save Tailscale state
+          # Full backup of C:\Users (everything: programs, settings, files)
+          $usersPath = "C:\Users"
+          $backupPath = "C:\temp-backup-full"
+          
+          Write-Host "Compressing entire C:\Users folder..." -ForegroundColor Yellow
+          Write-Host "This may take several minutes..." -ForegroundColor Yellow
+          
+          try {
+              # Use faster compression for large data
+              Compress-Archive -Path "$usersPath\*" -DestinationPath "$backupPath\full-system-backup.zip" -CompressionLevel Fastest -Force -ErrorAction SilentlyContinue
+              
+              Write-Host "Uploading to Terabox..." -ForegroundColor Yellow
+              rclone copy "$backupPath\full-system-backup.zip" "terabox:" --progress
+              
+              Write-Host "✅ Full system backup saved to Terabox" -ForegroundColor Green
+              Remove-Item $backupPath -Recurse -Force -ErrorAction SilentlyContinue
+          } catch {
+              Write-Warning "Full backup failed: $_"
+          }
+
+      - name: Save Quick State (Lightweight)
+        if: always()
+        shell: powershell
+        run: |
+          Write-Host "`nSaving lightweight state for fast next boot..." -ForegroundColor Cyan
+          if (-not "${{ secrets.RCLONE_CONFIG }}") { return }
+
+          # 1. Tailscale
           try {
               $tsState = "$env:ProgramData\Tailscale"
               if (Test-Path $tsState) {
                   Compress-Archive -Path "$tsState\*" -DestinationPath "tailscale-state.zip" -Force
-                  rclone copy "tailscale-state.zip" "terabox:"
+                  rclone copy "tailscale-state.zip" "terabox:" --quiet
               }
-          } catch { Write-Warning "Tailscale save failed: $_" }
+          } catch { Write-Warning "Tailscale save failed" }
 
-          # 2. Save Registry Settings (User Software Hive)
+          # 2. Registry
           try {
-              reg export "HKCU\Software" "registry-state.reg" /y
-              rclone copy "registry-state.reg" "terabox:"
-          } catch { Write-Warning "Registry save failed: $_" }
+              reg export "HKCU\Software" "registry-state.reg" /y 2>$null
+              rclone copy "registry-state.reg" "terabox:" --quiet
+          } catch { Write-Warning "Registry save failed" }
 
-          # 3. Save AppData (Roaming) - Only high-value folders
-          try {
-              if (Test-Path $env:APPDATA) {
-                  Compress-Archive -Path "$env:APPDATA\*" -DestinationPath "appdata-state.zip" -Force -ErrorAction SilentlyContinue
-                  rclone copy "appdata-state.zip" "terabox:"
-              }
-          } catch { Write-Warning "AppData save failed: $_" }
-
-          # 4. Save User Folders (Desktop, Documents)
+          # 3. Desktop & Documents
           $userFolders = @("Desktop", "Documents")
           foreach ($folder in $userFolders) {
               try {
                   $source = [System.IO.Path]::Combine($env:USERPROFILE, $folder)
                   if (Test-Path $source) {
                       Compress-Archive -Path "$source\*" -DestinationPath "$($folder.ToLower())-state.zip" -Force
-                      rclone copy "$($folder.ToLower())-state.zip" "terabox:"
+                      rclone copy "$($folder.ToLower())-state.zip" "terabox:" --quiet
                   }
-              } catch { Write-Warning "$folder save failed: $_" }
+              } catch { }
           }
-          Write-Host "State backup completed."
+          Write-Host "✅ Quick state saved" -ForegroundColor Green
