@@ -94,11 +94,12 @@ jobs:
           Write-Host "Quick restore for fast startup..." -ForegroundColor Cyan
           if ($env:HAS_RCLONE -ne 'true') { return }
 
-          # Check if incremental sync exists (from continuous backup) - Using Google Drive
-          # Suppress errors for first run when folder doesn't exist
-          $ErrorActionPreference = 'SilentlyContinue'
+          # Check if incremental sync exists. We use rclone lsf and MANUALLY handle errors to prevent step failure.
           $useSyncRestore = rclone lsf "gdrive:astral-vm-backup/vm-sync/" 2>$null
-          $ErrorActionPreference = 'Continue'
+          if ($LASTEXITCODE -ne 0) {
+              $useSyncRestore = $null
+              $global:LASTEXITCODE = 0  # Force clear the error to prevent step failure
+          }
           
           if ($useSyncRestore) {
               Write-Host "Using incremental sync restore (faster)..." -ForegroundColor Green
@@ -109,15 +110,13 @@ jobs:
               rclone sync "gdrive:astral-vm-backup/vm-sync/AppData" "$env:APPDATA" --fast-list --quiet --ignore-errors
               
               # Registry
-              $ErrorActionPreference = 'SilentlyContinue'
               $hasReg = rclone lsf "gdrive:astral-vm-backup/vm-sync/" --include "*.reg" 2>$null
-              $ErrorActionPreference = 'Continue'
-              
-              if ($hasReg) {
+              if ($LASTEXITCODE -eq 0 -and $hasReg) {
                   rclone copy "gdrive:astral-vm-backup/vm-sync/" . --include "*.reg" --quiet
                   reg import "temp-reg-backup.reg" 2>$null
                   Remove-Item "temp-reg-backup.reg" -Force -ErrorAction SilentlyContinue
               }
+              $global:LASTEXITCODE = 0
               
               Write-Host "✅ Fast incremental restore complete" -ForegroundColor Green
           } else {
@@ -249,9 +248,9 @@ jobs:
           # The continuous backup has been syncing, just do one final push to Google Drive
           Write-Host "Performing final incremental sync to Google Drive..." -ForegroundColor Yellow
           
-          rclone sync "$env:USERPROFILE\Desktop" "gdrive:astral-vm-backup/vm-sync/Desktop" --fast-list --quiet --create-empty-src-dirs
-          rclone sync "$env:USERPROFILE\Documents" "gdrive:astral-vm-backup/vm-sync/Documents" --fast-list --quiet --create-empty-src-dirs
-          rclone sync "$env:APPDATA" "gdrive:astral-vm-backup/vm-sync/AppData" --exclude "*.tmp" --exclude "Temp/**" --fast-list --quiet --create-empty-src-dirs
+          rclone sync "$env:USERPROFILE\Desktop" "gdrive:astral-vm-backup/vm-sync/Desktop" --fast-list --quiet --create-empty-src-dirs --ignore-errors
+          rclone sync "$env:USERPROFILE\Documents" "gdrive:astral-vm-backup/vm-sync/Documents" --fast-list --quiet --create-empty-src-dirs --ignore-errors
+          rclone sync "$env:APPDATA" "gdrive:astral-vm-backup/vm-sync/AppData" --exclude "*.tmp" --exclude "Temp/**" --fast-list --quiet --create-empty-src-dirs --ignore-errors
           
           # Registry
           reg export "HKCU\Software" "C:\temp-reg-backup.reg" /y 2>$null
@@ -269,11 +268,8 @@ jobs:
           if ($env:HAS_RCLONE -ne 'true') { return }
 
           # Only create full backup once per week (expensive operation)
-          $ErrorActionPreference = 'SilentlyContinue'
-          $lastBackup = rclone lsl "gdrive:astral-vm-backup/full-system-backup.zip" 2>$null | Select-Object -First 1
-          $ErrorActionPreference = 'Continue'
-          
-          if ($lastBackup) {
+          $lastBackup = rclone lsl "gdrive:astral-vm-backup/full-system-backup.zip" 2>$null
+          if ($LASTEXITCODE -eq 0 -and $lastBackup) {
               try {
                   $backupDate = [datetime]::ParseExact(($lastBackup -split '\s+')[0..1] -join ' ', 'yyyy-MM-dd HH:mm:ss', $null)
                   $daysSince = ((Get-Date) - $backupDate).Days
@@ -286,13 +282,14 @@ jobs:
                   Write-Host "Could not parse last backup date. Creating new backup..." -ForegroundColor Yellow
               }
           }
+          $global:LASTEXITCODE = 0
           
           Write-Host "Creating full system snapshot to Google Drive (this may take time)..." -ForegroundColor Yellow
           $usersPath = "C:\Users"
           $backupPath = "C:\temp-backup-full"
           
           try {
-              New-Item -Path $backupPath -ItemType Directory -Force | Out-Null
+              if (-not (Test-Path $backupPath)) { New-Item -Path $backupPath -ItemType Directory -Force | Out-Null }
               Compress-Archive -Path "$usersPath\*" -DestinationPath "$backupPath\full-system-backup.zip" -CompressionLevel Fastest -Force -ErrorAction SilentlyContinue
               rclone copy "$backupPath\full-system-backup.zip" "gdrive:astral-vm-backup/" --progress
               Write-Host "✅ Full snapshot saved" -ForegroundColor Green
@@ -300,3 +297,4 @@ jobs:
           } catch {
               Write-Warning "Snapshot creation failed: $_"
           }
+          $global:LASTEXITCODE = 0
