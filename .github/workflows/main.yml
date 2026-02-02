@@ -6,7 +6,7 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 3600
+    timeout-minutes: 360
 
     steps:
       - name: Configure Core RDP Settings
@@ -15,7 +15,7 @@ jobs:
           # Enable RDP and optimize for speed
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force | Out-Null
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force | Out-Null
-          
+
           # Open firewall for RDP
           netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389 | Out-Null
@@ -27,17 +27,17 @@ jobs:
           # Rapid install using stable direct downloads
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.94.1.exe"
           $rcUrl = "https://downloads.rclone.org/rclone-current-windows-amd64.zip"
-          
+
           # Install Tailscale
           Invoke-WebRequest -Uri $tsUrl -OutFile "$env:TEMP\tailscale.exe"
           Start-Process "$env:TEMP\tailscale.exe" -ArgumentList "/quiet" -Wait
-          
+
           # Setup Rclone for Persistence
           Invoke-WebRequest -Uri $rcUrl -OutFile "$env:TEMP\rclone.zip"
           Expand-Archive -Path "$env:TEMP\rclone.zip" -DestinationPath "$env:TEMP\rclone" -Force
           $rcPath = Get-ChildItem -Path "$env:TEMP\rclone" -Filter "rclone.exe" -Recurse | Select-Object -First 1
           Copy-Item $rcPath.FullName -Destination "C:\Windows\System32\rclone.exe" -Force
-          
+
           # Cleanup installers
           Remove-Item "$env:TEMP\tailscale.exe", "$env:TEMP\rclone.zip" -Force
 
@@ -57,7 +57,7 @@ jobs:
           Write-Host "Checking for existing state on Drive..."
           # Only attempt restore if config is provided
           if (-not "${{ secrets.RCLONE_CONFIG }}") { Write-Host "No Rclone config found, skipping restore."; return }
-          
+
           # Target folders for persistence
           $targets = @("desktop", "documents", "tailscale-state")
           foreach ($t in $targets) {
@@ -65,7 +65,7 @@ jobs:
                   Write-Host "Restoring $t..."
                   rclone copy "drive:$t-state.zip" .
                   Expand-Archive -Path "$t-state.zip" -DestinationPath "C:\temp-restore\$t" -Force
-                  
+
                   # Move tailored files back to their source
                   if ($t -eq "tailscale-state") {
                       $tsPath = "$env:ProgramData\Tailscale"
@@ -95,23 +95,23 @@ jobs:
           $rawPassword += $charSet.Number | Get-Random -Count 4
           $rawPassword += $charSet.Special | Get-Random -Count 4
           $password = -join ($rawPassword | Sort-Object { Get-Random })
-          
+
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
           if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) { Remove-LocalUser -Name "RDP" }
           New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          
+
           "RDP_PASSWORD=$password" | Add-Content -Path $env:GITHUB_ENV
 
       - name: Establish Connection (Tailscale)
         shell: powershell
         run: |
           $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
-          
+
           # Bring up Tailscale (Login is reused if restored)
           & $tsExe up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-persistent
-          
+
           $tsIP = $null; $retries = 0
           while (-not $tsIP -and $retries -lt 12) {
               $tsIP = & $tsExe ip -4; if ($tsIP) { break }; Start-Sleep -Seconds 5; $retries++
@@ -119,7 +119,7 @@ jobs:
           if (-not $tsIP) { Write-Error "Tailscale IP failed"; exit 1 }
           "TAILSCALE_IP=$tsIP" | Add-Content -Path $env:GITHUB_ENV
 
-      - name: Work Session
+      - name: Work Session (Loop with Auto-Restart)
         shell: powershell
         run: |
           Write-Host "`n=== RDP LOGIN DETAILS ==="
@@ -127,9 +127,39 @@ jobs:
           Write-Host "User: RDP"
           Write-Host "Pass: $env:RDP_PASSWORD"
           Write-Host "=========================`n"
+
+          # Timer for Daisy Chain (5.5 hours = 19800 seconds)
+          $timerSeconds = 19800
+          Write-Host "Session active. Auto-restart triggered in 5.5 hours..."
           
-          # Keep alive
-          while ($true) { Start-Sleep -Seconds 300 }
+          # Sleep in increments to avoid hanging
+          $elapsed = 0
+          while ($elapsed -lt $timerSeconds) {
+              Start-Sleep -Seconds 300
+              $elapsed += 300
+          }
+
+          # Trigger Next Run (Daisy Chain)
+          Write-Host "Triggering next run via API..."
+          $repo = "$env:GITHUB_REPOSITORY"
+          $token = "${{ secrets.GH_PAT }}"
+
+          if ($token) {
+              $url = "https://api.github.com/repos/$repo/actions/workflows/main.yml/dispatches"
+              $body = @{ ref = "main" } | ConvertTo-Json
+              $headers = @{
+                  "Authorization" = "token $token"
+                  "Accept"        = "application/vnd.github.v3+json"
+              }
+              try {
+                  Invoke-RestMethod -Uri $url -Method Post -Headers $headers -Body $body
+                  Write-Host "Successfully triggered next run."
+              } catch {
+                  Write-Warning "Failed to trigger run: $_"
+              }
+          } else {
+              Write-Warning "GH_PAT secret missing. Auto-restart skipped."
+          }
 
       - name: Save Global State (Cleanup Policy)
         if: always()
@@ -137,7 +167,7 @@ jobs:
         run: |
           Write-Host "Saving state for persistence..."
           if (-not "${{ secrets.RCLONE_CONFIG }}") { return }
-          
+
           # 1. Save Tailscale login state (Crucial to avoid node limit)
           $tsState = "$env:ProgramData\Tailscale"
           if (Test-Path $tsState) {
