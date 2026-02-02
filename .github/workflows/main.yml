@@ -75,13 +75,32 @@ jobs:
           Write-Host "Quick restore for fast startup..." -ForegroundColor Cyan
           if (-not "${{ secrets.RCLONE_CONFIG }}") { return }
 
-          # Only restore lightweight state for fast boot
-          $targets = @("desktop", "documents", "tailscale-state", "registry-state")
-          foreach ($t in $targets) {
-              $ext = if ($t -eq "registry-state") { "reg" } else { "zip" }
-              if (rclone ls "terabox:$t.$ext" 2>$null) {
-                  Write-Host "Restoring $t..."
-                  try {
+          # Check if incremental sync exists (from continuous backup)
+          $useSyncRestore = rclone ls "terabox:vm-sync/" 2>$null
+          
+          if ($useSyncRestore) {
+              Write-Host "Using incremental sync restore (faster)..." -ForegroundColor Green
+              
+              # Restore from vm-sync (incremental backups)
+              rclone sync "terabox:vm-sync/Desktop" "$env:USERPROFILE\Desktop" --fast-list --quiet
+              rclone sync "terabox:vm-sync/Documents" "$env:USERPROFILE\Documents" --fast-list --quiet
+              rclone sync "terabox:vm-sync/AppData" "$env:APPDATA" --fast-list --quiet
+              
+              # Registry
+              if (rclone ls "terabox:vm-sync/*.reg" 2>$null) {
+                  rclone copy "terabox:vm-sync/" . --include "*.reg" --quiet
+                  reg import "temp-reg-backup.reg" 2>$null
+                  Remove-Item "temp-reg-backup.reg" -Force -ErrorAction SilentlyContinue
+              }
+              
+              Write-Host "✅ Fast incremental restore complete" -ForegroundColor Green
+          } else {
+              # Fallback to legacy zip restore
+              Write-Host "Using legacy restore method..." -ForegroundColor Yellow
+              $targets = @("desktop", "documents", "tailscale-state", "registry-state")
+              foreach ($t in $targets) {
+                  $ext = if ($t -eq "registry-state") { "reg" } else { "zip" }
+                  if (rclone ls "terabox:$t.$ext" 2>$null) {
                       rclone copy "terabox:$t.$ext" . --quiet
                       if ($t -eq "registry-state") {
                           reg import "$t.reg" 2>$null
@@ -93,11 +112,8 @@ jobs:
                           $dest = [System.IO.Path]::Combine($env:USERPROFILE, $t.Replace("-state",""))
                           Copy-Item "C:\temp-restore\$t\*" $dest -Recurse -Force
                       }
-                      Write-Host "✅ $t restored"
-                  } catch {
-                      Write-Warning "⚠️ $t restore failed: $_"
+                      Remove-Item "$t.$ext" -Force -ErrorAction SilentlyContinue
                   }
-                  Remove-Item "$t.$ext" -Force -ErrorAction SilentlyContinue
               }
           }
 
@@ -157,6 +173,17 @@ jobs:
           if (-not $tsIP) { Write-Error "Tailscale IP failed"; exit 1 }
           "TAILSCALE_IP=$tsIP" | Add-Content -Path $env:GITHUB_ENV
 
+      - name: Start Continuous Backup (Background)
+        shell: powershell
+        run: |
+          Write-Host "Starting automatic continuous backup..." -ForegroundColor Cyan
+          
+          # Start the backup script in a hidden background process
+          $scriptPath = "$env:GITHUB_WORKSPACE\continuous-backup.ps1"
+          Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`" -IntervalMinutes 30" -WindowStyle Hidden
+          
+          Write-Host "✅ Continuous backup active (syncs every 30 min)" -ForegroundColor Green
+
       - name: Work Session (Loop with Auto-Restart)
         shell: powershell
         run: |
@@ -165,7 +192,8 @@ jobs:
           Write-Host "User: RDP" -ForegroundColor Green
           Write-Host "Pass: $env:RDP_PASSWORD" -ForegroundColor Green
           Write-Host "=========================" -ForegroundColor Cyan
-          Write-Host "`nℹ️  To restore installed programs, double-click:" -ForegroundColor Yellow
+          Write-Host "`n💾 Auto-backup: Running every 30 minutes" -ForegroundColor Yellow
+          Write-Host "🔄 To restore installed programs, double-click:" -ForegroundColor Yellow
           Write-Host "   '🔄 Restore Full System' on the Desktop" -ForegroundColor Yellow
           Write-Host ""
 
@@ -200,64 +228,54 @@ jobs:
               }
           }
 
-      - name: Save Full System Backup
+      - name: Final Sync Before Restart
         if: always()
         shell: powershell
         run: |
-          Write-Host "`n=== Creating Full System Backup ===" -ForegroundColor Cyan
+          Write-Host "`n=== Final Sync Before Restart ===" -ForegroundColor Cyan
           if (-not "${{ secrets.RCLONE_CONFIG }}") { return }
 
-          # Full backup of C:\Users (everything: programs, settings, files)
+          # The continuous backup has been syncing, just do one final push
+          Write-Host "Performing final incremental sync..." -ForegroundColor Yellow
+          
+          rclone sync "$env:USERPROFILE\Desktop" "terabox:vm-sync/Desktop" --fast-list --quiet
+          rclone sync "$env:USERPROFILE\Documents" "terabox:vm-sync/Documents" --fast-list --quiet
+          rclone sync "$env:APPDATA" "terabox:vm-sync/AppData" --exclude "*.tmp" --exclude "Temp/**" --fast-list --quiet
+          
+          # Registry
+          reg export "HKCU\Software" "C:\temp-reg-backup.reg" /y 2>$null
+          rclone copy "C:\temp-reg-backup.reg" "terabox:vm-sync/" --quiet
+          
+          Write-Host "✅ Final sync complete" -ForegroundColor Green
+
+      - name: Create Full System Snapshot (Weekly)
+        if: always()
+        shell: powershell
+        run: |
+          Write-Host "`n=== Weekly Full Snapshot ===" -ForegroundColor Cyan
+          if (-not "${{ secrets.RCLONE_CONFIG }}") { return }
+
+          # Only create full backup once per week (expensive operation)
+          $lastBackup = rclone lsl "terabox:full-system-backup.zip" 2>$null | Select-Object -First 1
+          if ($lastBackup) {
+              $backupDate = [datetime]::ParseExact(($lastBackup -split '\s+')[0..1] -join ' ', 'yyyy-MM-dd HH:mm:ss', $null)
+              $daysSince = ((Get-Date) - $backupDate).Days
+              
+              if ($daysSince -lt 7) {
+                  Write-Host "Full backup is $daysSince days old. Skipping (only weekly)." -ForegroundColor Yellow
+                  return
+              }
+          }
+          
+          Write-Host "Creating full system snapshot (this may take time)..." -ForegroundColor Yellow
           $usersPath = "C:\Users"
           $backupPath = "C:\temp-backup-full"
           
-          Write-Host "Compressing entire C:\Users folder..." -ForegroundColor Yellow
-          Write-Host "This may take several minutes..." -ForegroundColor Yellow
-          
           try {
-              # Use faster compression for large data
               Compress-Archive -Path "$usersPath\*" -DestinationPath "$backupPath\full-system-backup.zip" -CompressionLevel Fastest -Force -ErrorAction SilentlyContinue
-              
-              Write-Host "Uploading to Terabox..." -ForegroundColor Yellow
               rclone copy "$backupPath\full-system-backup.zip" "terabox:" --progress
-              
-              Write-Host "✅ Full system backup saved to Terabox" -ForegroundColor Green
+              Write-Host "✅ Full snapshot saved" -ForegroundColor Green
               Remove-Item $backupPath -Recurse -Force -ErrorAction SilentlyContinue
           } catch {
-              Write-Warning "Full backup failed: $_"
+              Write-Warning "Snapshot creation failed: $_"
           }
-
-      - name: Save Quick State (Lightweight)
-        if: always()
-        shell: powershell
-        run: |
-          Write-Host "`nSaving lightweight state for fast next boot..." -ForegroundColor Cyan
-          if (-not "${{ secrets.RCLONE_CONFIG }}") { return }
-
-          # 1. Tailscale
-          try {
-              $tsState = "$env:ProgramData\Tailscale"
-              if (Test-Path $tsState) {
-                  Compress-Archive -Path "$tsState\*" -DestinationPath "tailscale-state.zip" -Force
-                  rclone copy "tailscale-state.zip" "terabox:" --quiet
-              }
-          } catch { Write-Warning "Tailscale save failed" }
-
-          # 2. Registry
-          try {
-              reg export "HKCU\Software" "registry-state.reg" /y 2>$null
-              rclone copy "registry-state.reg" "terabox:" --quiet
-          } catch { Write-Warning "Registry save failed" }
-
-          # 3. Desktop & Documents
-          $userFolders = @("Desktop", "Documents")
-          foreach ($folder in $userFolders) {
-              try {
-                  $source = [System.IO.Path]::Combine($env:USERPROFILE, $folder)
-                  if (Test-Path $source) {
-                      Compress-Archive -Path "$source\*" -DestinationPath "$($folder.ToLower())-state.zip" -Force
-                      rclone copy "$($folder.ToLower())-state.zip" "terabox:" --quiet
-                  }
-              } catch { }
-          }
-          Write-Host "✅ Quick state saved" -ForegroundColor Green
