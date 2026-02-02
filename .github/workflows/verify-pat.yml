@@ -1,0 +1,41 @@
+name: Verify GH_PAT
+
+on:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Test GitHub API with PAT
+        shell: bash
+        run: |
+          if [ -z "${{ secrets.GH_PAT }}" ]; then
+            echo "::error::GH_PAT secret is missing!"
+            exit 1
+          fi
+
+          echo "Attempting to call GitHub API using GH_PAT..."
+          
+          # We try to get the authenticated user. This confirms the token is valid.
+          RESPONSE=$(curl -s -H "Authorization: token ${{ secrets.GH_PAT }}" https://api.github.com/user)
+          
+          LOGIN=$(echo $RESPONSE | jq -r '.login')
+          
+          if [ "$LOGIN" != "null" ]; then
+            echo "✅ GH_PAT is VALID!"
+            echo "Authenticated as: $LOGIN"
+            
+            # Now let's check if it has repo/workflow permissions by trying to get the workflow list
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: token ${{ secrets.GH_PAT }}" https://api.github.com/repos/${{ github.repository }}/actions/workflows)
+            
+            if [ "$STATUS" -eq "200" ]; then
+              echo "✅ GH_PAT has correct SCOPES (workflow/repo)!"
+            else
+              echo "::error::GH_PAT is valid but missing 'workflow' scope! HTTP Status: $STATUS"
+              exit 1
+            fi
+          else
+            echo "::error::GH_PAT is INVALID! GitHub API says: $(echo $RESPONSE | jq -r '.message')"
+            exit 1
+          fi
