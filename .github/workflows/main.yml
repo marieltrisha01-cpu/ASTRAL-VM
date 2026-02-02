@@ -9,6 +9,21 @@ jobs:
     timeout-minutes: 360
 
     steps:
+      - name: Pre-Flight Verification (Hardening)
+        shell: powershell
+        run: |
+          $secretsCount = 0
+          if ("${{ secrets.TAILSCALE_AUTH_KEY }}") { Write-Host "✅ Tailscale Key Found"; $secretsCount++ }
+          else { Write-Warning "❌ Tailscale Key Missing" }
+
+          if ("${{ secrets.RCLONE_CONFIG }}") { Write-Host "✅ Rclone Config Found"; $secretsCount++ }
+          else { Write-Warning "❌ Rclone Config Missing (Save/Restore will fail)" }
+
+          if ("${{ secrets.GH_PAT }}") { Write-Host "✅ GH_PAT Found (Auto-Restart enabled)" }
+          else { Write-Warning "⚠️ GH_PAT Missing (VM will only run 6 hours)" }
+
+          if ($secretsCount -lt 2) { Write-Error "Critical secrets missing. Stopping to prevent data loss."; exit 1 }
+
       - name: Configure Core RDP Settings
         shell: powershell
         run: |
@@ -63,22 +78,26 @@ jobs:
               $ext = if ($t -eq "registry-state") { "reg" } else { "zip" }
               if (rclone ls "drive:$t.$ext" 2>$null) {
                   Write-Host "Restoring $t..."
-                  rclone copy "drive:$t.$ext" .
-                  
-                  if ($t -eq "registry-state") {
-                      reg import "$t.reg"
-                  } elseif ($t -eq "appdata-state") {
-                      Expand-Archive -Path "$t.zip" -DestinationPath "C:\temp-restore\AppData" -Force
-                      Copy-Item "C:\temp-restore\AppData\*" $env:APPDATA -Recurse -Force
-                  } elseif ($t -eq "tailscale-state") {
-                      Expand-Archive -Path "$t.zip" -DestinationPath "C:\temp-restore\$t" -Force
-                      Copy-Item "C:\temp-restore\$t\*" "$env:ProgramData\Tailscale" -Recurse -Force
-                  } else {
-                      Expand-Archive -Path "$t.zip" -DestinationPath "C:\temp-restore\$t" -Force
-                      $dest = [System.IO.Path]::Combine($env:USERPROFILE, $t.Replace("-state",""))
-                      Copy-Item "C:\temp-restore\$t\*" $dest -Recurse -Force
+                  try {
+                      rclone copy "drive:$t.$ext" .
+                      if ($t -eq "registry-state") {
+                          reg import "$t.reg"
+                      } elseif ($t -eq "appdata-state") {
+                          Expand-Archive -Path "$t.zip" -DestinationPath "C:\temp-restore\AppData" -Force
+                          Copy-Item "C:\temp-restore\AppData\*" $env:APPDATA -Recurse -Force -ErrorAction SilentlyContinue
+                      } elseif ($t -eq "tailscale-state") {
+                          Expand-Archive -Path "$t.zip" -DestinationPath "C:\temp-restore\$t" -Force
+                          Copy-Item "C:\temp-restore\$t\*" "$env:ProgramData\Tailscale" -Recurse -Force
+                      } else {
+                          Expand-Archive -Path "$t.zip" -DestinationPath "C:\temp-restore\$t" -Force
+                          $dest = [System.IO.Path]::Combine($env:USERPROFILE, $t.Replace("-state",""))
+                          Copy-Item "C:\temp-restore\$t\*" $dest -Recurse -Force
+                      }
+                      Write-Host "✅ $t restored successfully."
+                  } catch {
+                      Write-Warning "⚠️ Failed to restore $t: $_"
                   }
-                  Remove-Item "$t.$ext" -Force
+                  Remove-Item "$t.$ext" -Force -ErrorAction SilentlyContinue
               }
           }
 
@@ -130,16 +149,15 @@ jobs:
           Write-Host "Pass: $env:RDP_PASSWORD"
           Write-Host "=========================`n"
 
-          # Timer for Daisy Chain (5.5 hours = 19800 seconds)
-          $timerSeconds = 19800
-          Write-Host "Session active. Auto-restart triggered in 5.5 hours..."
+          # Timer for Daisy Chain (5 hours 45 mins = 20700 seconds)
+          $timerSeconds = 20700
+          Write-Host "Session active. Auto-restart triggered in 5 hours 45 minutes..."
           
           # Sleep in increments to avoid hanging
           $elapsed = 0
           while ($elapsed -lt $timerSeconds) {
               Start-Sleep -Seconds 300
               $elapsed += 300
-              # Optional: Add small vibration/activity to prevent RDP idle disconnect
           }
 
           # Trigger Next Run (Daisy Chain)
@@ -162,7 +180,7 @@ jobs:
               }
           }
 
-      - name: Save Global State (Settings & Data)
+      - name: Save Global State (Fail-Safe Policy)
         if: always()
         shell: powershell
         run: |
@@ -170,33 +188,37 @@ jobs:
           if (-not "${{ secrets.RCLONE_CONFIG }}") { return }
 
           # 1. Save Tailscale state
-          $tsState = "$env:ProgramData\Tailscale"
-          if (Test-Path $tsState) {
-              Compress-Archive -Path "$tsState\*" -DestinationPath "tailscale-state.zip" -Force
-              rclone copy "tailscale-state.zip" "drive:"
-          }
+          try {
+              $tsState = "$env:ProgramData\Tailscale"
+              if (Test-Path $tsState) {
+                  Compress-Archive -Path "$tsState\*" -DestinationPath "tailscale-state.zip" -Force
+                  rclone copy "tailscale-state.zip" "drive:"
+              }
+          } catch { Write-Warning "Tailscale save failed: $_" }
 
           # 2. Save Registry Settings (User Software Hive)
-          Write-Host "Exporting registry settings..."
-          reg export "HKCU\Software" "registry-state.reg" /y
-          rclone copy "registry-state.reg" "drive:"
+          try {
+              reg export "HKCU\Software" "registry-state.reg" /y
+              rclone copy "registry-state.reg" "drive:"
+          } catch { Write-Warning "Registry save failed: $_" }
 
-          # 3. Save AppData (Roaming)
-          if (Test-Path $env:APPDATA) {
-              Write-Host "Compressing AppData..."
-              Compress-Archive -Path "$env:APPDATA\*" -DestinationPath "appdata-state.zip" -Force
-              rclone copy "appdata-state.zip" "drive:"
-          }
+          # 3. Save AppData (Roaming) - Only high-value folders
+          try {
+              if (Test-Path $env:APPDATA) {
+                  Compress-Archive -Path "$env:APPDATA\*" -DestinationPath "appdata-state.zip" -Force -ErrorAction SilentlyContinue
+                  rclone copy "appdata-state.zip" "drive:"
+              }
+          } catch { Write-Warning "AppData save failed: $_" }
 
           # 4. Save User Folders (Desktop, Documents)
           $userFolders = @("Desktop", "Documents")
           foreach ($folder in $userFolders) {
-              $source = [System.IO.Path]::Combine($env:USERPROFILE, $folder)
-              if (Test-Path $source) {
-                  $files = Get-ChildItem $source
-                  if ($files) {
+              try {
+                  $source = [System.IO.Path]::Combine($env:USERPROFILE, $folder)
+                  if (Test-Path $source) {
                       Compress-Archive -Path "$source\*" -DestinationPath "$($folder.ToLower())-state.zip" -Force
                       rclone copy "$($folder.ToLower())-state.zip" "drive:"
                   }
-              }
+              } catch { Write-Warning "$folder save failed: $_" }
           }
+          Write-Host "State backup completed."
