@@ -46,13 +46,6 @@ jobs:
           $rcPath = Get-ChildItem -Path "$env:TEMP\rclone" -Filter "rclone.exe" -Recurse | Select-Object -First 1
           Copy-Item $rcPath.FullName -Destination "C:\Windows\System32\rclone.exe" -Force
 
-      - name: Install User Apps (Persistence Strategy)
-        shell: powershell
-        run: |
-          choco install googlechrome -y --no-progress
-          choco install docker-desktop -y --no-progress
-          # Add more apps here (e.g., vscode, python3, git)
-
       - name: Setup Rclone Configuration
         shell: powershell
         env:
@@ -71,12 +64,11 @@ jobs:
           if ($env:HAS_RCLONE -ne 'true') { exit 0 }
           $folderExists = & rclone lsf "gdrive:astral-vm-backup/vm-sync/" 2>$null
           if ($LASTEXITCODE -eq 0 -and $folderExists) {
-              & rclone sync "gdrive:astral-vm-backup/vm-sync/Desktop" "$env:USERPROFILE\Desktop" --fast-list --quiet --ignore-errors
-              & rclone sync "gdrive:astral-vm-backup/vm-sync/Documents" "$env:USERPROFILE\Documents" --fast-list --quiet --ignore-errors
-              & rclone sync "gdrive:astral-vm-backup/vm-sync/Downloads" "$env:USERPROFILE\Downloads" --fast-list --quiet --ignore-errors
-              & rclone sync "gdrive:astral-vm-backup/vm-sync/AppData" "$env:APPDATA" --fast-list --quiet --ignore-errors
-              & rclone sync "gdrive:astral-vm-backup/vm-sync/ChromeData" "$env:LOCALAPPDATA\Google\Chrome\User Data" --fast-list --quiet --ignore-errors --exclude "Default/Cache/**"
-              & rclone sync "gdrive:astral-vm-backup/vm-sync/DockerConfig" "$env:USERPROFILE\.docker" --fast-list --quiet --ignore-errors
+              $syncs = @("Desktop", "Documents", "Downloads", "Pictures", "Videos", "AppData", "ChromeData", "DockerConfig")
+              foreach ($s in $syncs) {
+                  $target = if ($s -eq "AppData") { $env:APPDATA } elseif ($s -eq "ChromeData") { "$env:LOCALAPPDATA\Google\Chrome\User Data" } elseif ($s -eq "DockerConfig") { "$env:USERPROFILE\.docker" } else { "$env:USERPROFILE\$s" }
+                  & rclone sync "gdrive:astral-vm-backup/vm-sync/$s" $target --fast-list --quiet --ignore-errors
+              }
               $regFile = & rclone lsf "gdrive:astral-vm-backup/vm-sync/" --include "*.reg" 2>$null
               if ($LASTEXITCODE -eq 0 -and $regFile) {
                   & rclone copy "gdrive:astral-vm-backup/vm-sync/" . --include "*.reg" --quiet
@@ -85,6 +77,25 @@ jobs:
               }
           }
           $global:LASTEXITCODE = 0; exit 0
+
+      - name: Install User Apps (Dynamic Recovery)
+        shell: powershell
+        run: |
+          # 1. Base Apps (Always Installed)
+          choco install googlechrome -y --no-progress
+          choco install docker-desktop -y --no-progress
+          
+          # 2. Dynamic Apps (Restored from cloud manifest)
+          $manifestPath = "C:\temp-apps.json"
+          & rclone copy "gdrive:astral-vm-backup/vm-sync/installed-apps.json" "C:\" --quiet 2>$null
+          if (Test-Path "C:\installed-apps.json") {
+              Write-Host "Restoring user apps from manifest..."
+              $apps = Get-Content "C:\installed-apps.json" | ConvertFrom-Json
+              foreach ($app in $apps) {
+                  Write-Host "Re-installing $app..."
+                  choco install $app -y --no-progress --ignore-dependencies --limit-output
+              }
+          }
 
       - name: Create Managed VPS User
         shell: powershell
@@ -105,11 +116,13 @@ jobs:
           $tsIP = & $tsExe ip -4
           "TAILSCALE_IP=$tsIP" | Add-Content -Path $env:GITHUB_ENV
 
-      - name: Start Continuous Backup (Background)
+      - name: Start Continuous Sync & Tacker (Background)
         shell: powershell
         run: |
-          $scriptPath = "$env:GITHUB_WORKSPACE\continuous-backup.ps1"
-          Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`" -IntervalMinutes 30" -WindowStyle Hidden
+          # Start Backup Engine
+          Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$env:GITHUB_WORKSPACE\continuous-backup.ps1`" -IntervalMinutes 30" -WindowStyle Hidden
+          # Start App Tracker Engine
+          Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$env:GITHUB_WORKSPACE\app-tracker.ps1`" -IntervalMinutes 15" -WindowStyle Hidden
 
       - name: Work Session (Loop with Auto-Restart)
         shell: powershell
@@ -124,17 +137,21 @@ jobs:
               Invoke-RestMethod -Uri $url -Method Post -Headers @{"Authorization"="token $token"} -Body (@{ref="main"}|ConvertTo-Json)
           }
 
-      - name: Final Sync Before Restart
+      - name: Final Global Sync
         if: always()
         shell: powershell
         run: |
           $ErrorActionPreference = 'SilentlyContinue'
-          & rclone sync "$env:USERPROFILE\Desktop" "gdrive:astral-vm-backup/vm-sync/Desktop" --fast-list --quiet --ignore-errors
-          & rclone sync "$env:USERPROFILE\Documents" "gdrive:astral-vm-backup/vm-sync/Documents" --fast-list --quiet --ignore-errors
-          & rclone sync "$env:USERPROFILE\Downloads" "gdrive:astral-vm-backup/vm-sync/Downloads" --fast-list --quiet --ignore-errors
-          & rclone sync "$env:APPDATA" "gdrive:astral-vm-backup/vm-sync/AppData" --exclude "*.tmp" --exclude "Temp/**" --fast-list --quiet --ignore-errors
-          & rclone sync "$env:LOCALAPPDATA\Google\Chrome\User Data" "gdrive:astral-vm-backup/vm-sync/ChromeData" --exclude "Default/Cache/**" --fast-list --quiet --ignore-errors
-          & rclone sync "$env:USERPROFILE\.docker" "gdrive:astral-vm-backup/vm-sync/DockerConfig" --fast-list --quiet --ignore-errors
+          $syncs = @{ "Desktop"="$env:USERPROFILE\Desktop"; "Documents"="$env:USERPROFILE\Documents"; "Downloads"="$env:USERPROFILE\Downloads"; "Pictures"="$env:USERPROFILE\Pictures"; "Videos"="$env:USERPROFILE\Videos"; "AppData"="$env:APPDATA"; "ChromeData"="$env:LOCALAPPDATA\Google\Chrome\User Data"; "DockerConfig"="$env:USERPROFILE\.docker" }
+          foreach ($k in $syncs.Keys) {
+             $src = $syncs[$k]
+             $dest = "gdrive:astral-vm-backup/vm-sync/$k"
+             if ($k -eq "ChromeData") {
+                & rclone sync $src $dest --exclude "Default/Cache/**" --fast-list --quiet --ignore-errors
+             } else {
+                & rclone sync $src $dest --exclude "*.tmp" --fast-list --quiet --ignore-errors
+             }
+          }
           reg export "HKCU\Software" "C:\temp-reg-backup.reg" /y 2>$null
           & rclone copy "C:\temp-reg-backup.reg" "gdrive:astral-vm-backup/vm-sync/" --quiet
           $global:LASTEXITCODE = 0; exit 0
