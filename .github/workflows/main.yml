@@ -1,138 +1,46 @@
-name: RDP (Persistent)
+INFINITE
+
+
+name: RDP
 
 on:
   workflow_dispatch:
 
-permissions: write-all
-
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 360
+    timeout-minutes: 3600
 
     steps:
-      - name: Pre-Flight Verification (Hardening)
-        shell: powershell
-        env:
-          HAS_TAILSCALE: ${{ secrets.TAILSCALE_AUTH_KEY != '' }}
-          HAS_RCLONE: ${{ secrets.RCLONE_CONFIG != '' }}
-          HAS_PAT: ${{ secrets.GH_PAT != '' }}
-        run: |
-          $secretsCount = 0
-          
-          if ($env:HAS_TAILSCALE -eq 'true') { 
-              Write-Host "✅ Tailscale Key Found"; $secretsCount++ 
-          } else { 
-              Write-Warning "❌ Tailscale Key Missing" 
-          }
-
-          if ($env:HAS_RCLONE -eq 'true') { 
-              Write-Host "✅ Rclone Config Found"; $secretsCount++ 
-          } else { 
-              Write-Warning "❌ Rclone Config Missing (Save/Restore will fail)" 
-          }
-
-          if ($env:HAS_PAT -eq 'true') { 
-              Write-Host "✅ GH_PAT Found (Auto-Restart enabled)" 
-          } else { 
-              Write-Warning "⚠️ GH_PAT Missing (VM will only run 6 hours)" 
-          }
-
-          if ($secretsCount -lt 2) { 
-              Write-Error "Critical secrets missing. Stopping to prevent data loss."
-              exit 1 
-          }
-
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
       - name: Configure Core RDP Settings
-        shell: powershell
         run: |
-          # Enable RDP and optimize for speed
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force | Out-Null
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force | Out-Null
+          # Enable Remote Desktop and disable Network Level Authentication (if needed)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "SecurityLayer" -Value 0 -Force
 
-          # Open firewall for RDP
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389 | Out-Null
+          # Remove any existing rule with the same name to avoid duplication
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          
+          # For testing, allow any incoming connection on port 3389
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389
+
+          # (Optional) Restart the Remote Desktop service to ensure changes take effect
           Restart-Service -Name TermService -Force
 
-      - name: Install Tools (Tailscale & Rclone)
-        shell: powershell
+      - name: Create RDP User with Secure Password
         run: |
-          # Rapid install using stable direct downloads
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.94.1.exe"
-          $rcUrl = "https://downloads.rclone.org/rclone-current-windows-amd64.zip"
-
-          # Install Tailscale
-          Invoke-WebRequest -Uri $tsUrl -OutFile "$env:TEMP\tailscale.exe"
-          Start-Process "$env:TEMP\tailscale.exe" -ArgumentList "/quiet" -Wait
-
-          # Setup Rclone for Persistence
-          Invoke-WebRequest -Uri $rcUrl -OutFile "$env:TEMP\rclone.zip"
-          Expand-Archive -Path "$env:TEMP\rclone.zip" -DestinationPath "$env:TEMP\rclone" -Force
-          $rcPath = Get-ChildItem -Path "$env:TEMP\rclone" -Filter "rclone.exe" -Recurse | Select-Object -First 1
-          Copy-Item $rcPath.FullName -Destination "C:\Windows\System32\rclone.exe" -Force
-
-          # Cleanup installers
-          Remove-Item "$env:TEMP\tailscale.exe", "$env:TEMP\rclone.zip" -Force
-
-      - name: Setup Rclone Configuration
-        shell: powershell
-        env:
-          RCLONE_CONFIG_CONTENT: ${{ secrets.RCLONE_CONFIG }}
-        run: |
-          # Write the rclone config from secrets using environment variable (avoids escaping issues)
-          $configPath = [System.IO.Path]::Combine($env:AppData, "rclone", "rclone.conf")
-          New-Item -ItemType Directory -Path (Split-Path $configPath) -Force | Out-Null
-          $env:RCLONE_CONFIG_CONTENT | Set-Content -Path $configPath -Encoding UTF8
-
-      - name: Restore Quick State (Fast Startup)
-        shell: powershell
-        env:
-          HAS_RCLONE: ${{ secrets.RCLONE_CONFIG != '' }}
-        run: |
-          # COMPLETELY DISABLE ERROR STOPPING FOR THIS STEP
-          $ErrorActionPreference = 'SilentlyContinue'
-          Write-Host "Quick restore for fast startup..." -ForegroundColor Cyan
-          if ($env:HAS_RCLONE -ne 'true') { exit 0 }
-
-          # Check if the backup folder exists. Use & to run as command and capture result.
-          $folderExists = & rclone lsf "gdrive:astral-vm-backup/vm-sync/" 2>$null
-          $exitCode = $LASTEXITCODE
-          
-          if ($exitCode -eq 0 -and $folderExists) {
-              Write-Host "Sync data found. Restoring..." -ForegroundColor Green
-              & rclone sync "gdrive:astral-vm-backup/vm-sync/Desktop" "$env:USERPROFILE\Desktop" --fast-list --quiet --ignore-errors
-              & rclone sync "gdrive:astral-vm-backup/vm-sync/Documents" "$env:USERPROFILE\Documents" --fast-list --quiet --ignore-errors
-              & rclone sync "gdrive:astral-vm-backup/vm-sync/AppData" "$env:APPDATA" --fast-list --quiet --ignore-errors
-              
-              # Try to import registry backup if it exists
-              $regFile = & rclone lsf "gdrive:astral-vm-backup/vm-sync/" --include "*.reg" 2>$null
-              if ($LASTEXITCODE -eq 0 -and $regFile) {
-                  & rclone copy "gdrive:astral-vm-backup/vm-sync/" . --include "*.reg" --quiet
-                  Write-Host "Importing registry backup..."
-                  & reg import "temp-reg-backup.reg" 2>$null
-                  Remove-Item "temp-reg-backup.reg" -Force -ErrorAction SilentlyContinue
-              }
-          } else {
-              Write-Host "No previous sync data found or directory missing (Exit Code: $exitCode). Starting fresh." -ForegroundColor Yellow
-              Write-Host "This is normal for the first run!" -ForegroundColor Yellow
-          }
-          
-          # ALWAYS SIGNAL SUCCESS TO ACTIONS
-          $global:LASTEXITCODE = 0
-          exit 0
-
-      - name: Create Managed VPS User
-        shell: powershell
-        run: |
-          # Use requested secure password generation
           Add-Type -AssemblyName System.Security
           $charSet = @{
-              Upper   = [char[]](65..90); Lower = [char[]](97..122); 
-              Number  = [char[]](48..57); Special = [char[]](33..47)
+              Upper   = [char[]](65..90)      # A-Z
+              Lower   = [char[]](97..122)     # a-z
+              Number  = [char[]](48..57)      # 0-9
+              Special = ([char[]](33..47) + [char[]](58..64) +
+                         [char[]](91..96) + [char[]](123..126)) # Special characters
           }
           $rawPassword = @()
           $rawPassword += $charSet.Upper | Get-Random -Count 4
@@ -140,165 +48,69 @@ jobs:
           $rawPassword += $charSet.Number | Get-Random -Count 4
           $rawPassword += $charSet.Special | Get-Random -Count 4
           $password = -join ($rawPassword | Sort-Object { Get-Random })
-
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) { Remove-LocalUser -Name "RDP" }
           New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-
-          "RDP_PASSWORD=$password" | Add-Content -Path $env:GITHUB_ENV
-
-      - name: Setup Desktop Shortcuts
-        shell: powershell
-        run: |
-          $desktop = [System.IO.Path]::Combine($env:USERPROFILE, "Desktop")
           
-          # Create shortcut for Full System Restore
-          $WshShell = New-Object -ComObject WScript.Shell
-          $shortcut = $WshShell.CreateShortcut("$desktop\🔄 Restore Full System.lnk")
-          $shortcut.TargetPath = "powershell.exe"
-          $shortcut.Arguments = "-ExecutionPolicy Bypass -File `"$env:GITHUB_WORKSPACE\restore-full-system.ps1`""
-          $shortcut.WorkingDirectory = "$env:USERPROFILE"
-          $shortcut.IconLocation = "imageres.dll,78"
-          $shortcut.Description = "Restore complete system backup from Google Drive"
-          $shortcut.Save()
+          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
           
-          Write-Host "✅ Desktop shortcuts created"
-
-      - name: Establish Connection (Tailscale)
-        shell: powershell
-        run: |
-          $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
-
-          # Bring up Tailscale (Login is reused if restored)
-          & $tsExe up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-persistent --ssh --advertise-exit-node
-
-          $tsIP = $null; $retries = 0
-          while (-not $tsIP -and $retries -lt 12) {
-              $tsIP = & $tsExe ip -4; if ($tsIP) { break }; Start-Sleep -Seconds 5; $retries++
+          if (-not (Get-LocalUser -Name "RDP")) {
+              Write-Error "User creation failed"
+              exit 1
           }
-          if (-not $tsIP) { Write-Error "Tailscale IP failed"; exit 1 }
-          "TAILSCALE_IP=$tsIP" | Add-Content -Path $env:GITHUB_ENV
 
-      - name: Start Continuous Backup (Background)
-        shell: powershell
+      - name: Install Tailscale
         run: |
-          Write-Host "Starting automatic continuous backup..." -ForegroundColor Cyan
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
           
-          # Start the backup script in a hidden background process
-          $scriptPath = "$env:GITHUB_WORKSPACE\continuous-backup.ps1"
-          Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`" -IntervalMinutes 30" -WindowStyle Hidden
-          
-          Write-Host "✅ Continuous backup active (syncs every 30 min)" -ForegroundColor Green
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
 
-      - name: Work Session (Loop with Auto-Restart)
-        shell: powershell
+      - name: Establish Tailscale Connection
         run: |
-          Write-Host "`n=== RDP LOGIN DETAILS ===" -ForegroundColor Cyan
-          Write-Host "IP: $env:TAILSCALE_IP" -ForegroundColor Green
-          Write-Host "User: RDP" -ForegroundColor Green
-          Write-Host "Pass: $env:RDP_PASSWORD" -ForegroundColor Green
-          Write-Host "=========================" -ForegroundColor Cyan
-          Write-Host "`n💾 Auto-backup: Running every 30 minutes to Google Drive" -ForegroundColor Yellow
-          Write-Host "🔄 To restore installed programs, double-click:" -ForegroundColor Yellow
-          Write-Host "   '🔄 Restore Full System' on the Desktop" -ForegroundColor Yellow
-          Write-Host ""
-
-          # Timer for Daisy Chain (5 hours 45 mins = 20700 seconds)
-          $timerSeconds = 20700
-          Write-Host "Session active. Auto-restart in 5h 45m..." -ForegroundColor Cyan
+          # Bring up Tailscale with the provided auth key and set a unique hostname
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
           
-          # Sleep in increments
-          $elapsed = 0
-          while ($elapsed -lt $timerSeconds) {
+          # Wait for Tailscale to assign an IP
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
+          }
+          
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
+          }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+      
+      - name: Verify RDP Accessibility
+        run: |
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          
+          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
+          }
+          Write-Host "TCP connectivity successful!"
+
+      - name: Maintain Connection
+        run: |
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: RDP"
+          Write-Host "Password: $(echo $env:RDP_CREDS)"
+          Write-Host "==================`n"
+          
+          # Keep runner active indefinitely (or until manually cancelled)
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
               Start-Sleep -Seconds 300
-              $elapsed += 300
           }
-
-          # Trigger Next Run (Daisy Chain)
-          Write-Host "`nTriggering next run via API..." -ForegroundColor Yellow
-          $repo = "$env:GITHUB_REPOSITORY"
-          $token = "${{ secrets.GH_PAT }}"
-
-          if ($token) {
-              $url = "https://api.github.com/repos/$repo/actions/workflows/main.yml/dispatches"
-              $body = @{ ref = "main" } | ConvertTo-Json
-              $headers = @{
-                  "Authorization" = "token $token"
-                  "Accept"        = "application/vnd.github.v3+json"
-              }
-              try {
-                  Invoke-RestMethod -Uri $url -Method Post -Headers $headers -Body $body
-                  Write-Host "✅ Next run triggered successfully" -ForegroundColor Green
-              } catch {
-                  Write-Warning "Failed to trigger run: $_"
-              }
-          }
-
-      - name: Final Sync Before Restart
-        if: always()
-        shell: powershell
-        env:
-          HAS_RCLONE: ${{ secrets.RCLONE_CONFIG != '' }}
-        run: |
-          $ErrorActionPreference = 'SilentlyContinue'
-          Write-Host "`n=== Final Sync Before Restart ===" -ForegroundColor Cyan
-          if ($env:HAS_RCLONE -ne 'true') { exit 0 }
-
-          # The continuous backup has been syncing, just do one final push to Google Drive
-          Write-Host "Performing final incremental sync to Google Drive..." -ForegroundColor Yellow
-          
-          & rclone sync "$env:USERPROFILE\Desktop" "gdrive:astral-vm-backup/vm-sync/Desktop" --fast-list --quiet --create-empty-src-dirs --ignore-errors
-          & rclone sync "$env:USERPROFILE\Documents" "gdrive:astral-vm-backup/vm-sync/Documents" --fast-list --quiet --create-empty-src-dirs --ignore-errors
-          & rclone sync "$env:APPDATA" "gdrive:astral-vm-backup/vm-sync/AppData" --exclude "*.tmp" --exclude "Temp/**" --fast-list --quiet --create-empty-src-dirs --ignore-errors
-          
-          # Registry
-          reg export "HKCU\Software" "C:\temp-reg-backup.reg" /y 2>$null
-          & rclone copy "C:\temp-reg-backup.reg" "gdrive:astral-vm-backup/vm-sync/" --quiet
-          
-          Write-Host "✅ Final sync complete" -ForegroundColor Green
-          $global:LASTEXITCODE = 0
-          exit 0
-
-      - name: Create Full System Snapshot (Weekly)
-        if: always()
-        shell: powershell
-        env:
-          HAS_RCLONE: ${{ secrets.RCLONE_CONFIG != '' }}
-        run: |
-          $ErrorActionPreference = 'SilentlyContinue'
-          Write-Host "`n=== Weekly Full Snapshot ===" -ForegroundColor Cyan
-          if ($env:HAS_RCLONE -ne 'true') { exit 0 }
-
-          # Only create full backup once per week (expensive operation)
-          $lastBackup = & rclone lsl "gdrive:astral-vm-backup/full-system-backup.zip" 2>$null
-          if ($LASTEXITCODE -eq 0 -and $lastBackup) {
-              try {
-                  $backupDate = [datetime]::ParseExact(($lastBackup -split '\s+')[0..1] -join ' ', 'yyyy-MM-dd HH:mm:ss', $null)
-                  $daysSince = ((Get-Date) - $backupDate).Days
-                  
-                  if ($daysSince -lt 7) {
-                      Write-Host "Full backup is $daysSince days old. Skipping (only weekly)." -ForegroundColor Yellow
-                      return
-                  }
-              } catch {
-                  Write-Host "Could not parse last backup date. Creating new backup..." -ForegroundColor Yellow
-              }
-          }
-          
-          Write-Host "Creating full system snapshot to Google Drive (this may take time)..." -ForegroundColor Yellow
-          $usersPath = "C:\Users"
-          $backupPath = "C:\temp-backup-full"
-          
-          try {
-              if (-not (Test-Path $backupPath)) { New-Item -Path $backupPath -ItemType Directory -Force | Out-Null }
-              Compress-Archive -Path "$usersPath\*" -DestinationPath "$backupPath\full-system-backup.zip" -CompressionLevel Fastest -Force -ErrorAction SilentlyContinue
-              & rclone copy "$backupPath\full-system-backup.zip" "gdrive:astral-vm-backup/" --progress
-              Write-Host "✅ Full snapshot saved" -ForegroundColor Green
-              Remove-Item $backupPath -Recurse -Force -ErrorAction SilentlyContinue
-          } catch {
-              Write-Warning "Snapshot creation failed: $_"
-          }
-          $global:LASTEXITCODE = 0
-          exit 0
